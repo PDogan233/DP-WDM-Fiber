@@ -2,3 +2,5 @@
 /.vscode
 /archive
 /__pycache__
+.gitignore
+*.pyc
