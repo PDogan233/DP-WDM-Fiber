@@ -231,6 +231,16 @@ def subband_convert(r_in, target_sps_sub, fs, Rs):
     if Nsub % 2 != 0:
         Nsub += 1
         
+    # Recalculate exact parameters in case of minor rounding adjustments
+    fs_sub_exact = fs * Nsub / Nt
+    # We aim to have an integer sps_sub_exact (same value as defined sps_sub), 
+    # otherwise the fractional error accumulate in the match filter and decimator stages (sampling point errors). 
+    # We know that sps_sub_exact =  sps_tx * N_sub / Nt, and Nt is defined as 2^N, 
+    # An easy way is to let sps_tx also be a power of 2 (the Nsub is a calculated value and is hard to control).
+    # Therefore, in para.py, p['sps'] is set as "2 ** int(np.ceil(np.log2(fs_target / p['Rs'])))"
+    # This ensure that the sps_sub_exact calculated here is definitely an integer.
+    sps_sub_exact = fs_sub_exact / Rs    # This also equals sps_tx * N_sub / Nt
+
     # 3. Transform to frequency domain
     R_shifted = np.fft.fftshift(np.fft.fft(r_in, axis=0), axes=0) / np.sqrt(Nt)
     
@@ -248,9 +258,7 @@ def subband_convert(r_in, target_sps_sub, fs, Rs):
     # Scale to maintain power due to sub-sampling
     r_time = r_time * np.sqrt(Nsub / Nt)
     
-    # Recalculate exact parameters in case of minor rounding adjustments
-    fs_sub_exact = fs * Nsub / Nt
-    sps_sub_exact = fs_sub_exact / Rs
+
     
     return r_time, Nsub, Nt, fs_sub_exact, sps_sub_exact
 

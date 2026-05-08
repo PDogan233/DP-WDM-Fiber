@@ -35,11 +35,13 @@ def get_parameters():
     guard_factor = 2.0 # Guard factor to ensure sufficient oversampling beyond Nyquist rate
     fs_target = p['B_wdm'] * (1 + guard_factor)
     
-    # Force tx sps to be a power of 2 to avoid fractional sps issues during FFT resampling
+    # Force tx sps to be a power of 2 to avoid fractional sps issues during function "subband_convert"
     p['sps'] = 2 ** int(np.ceil(np.log2(fs_target / p['Rs'])))  # Samples per symbol
     p['fs'] = p['sps'] * p['Rs']                 # Actual sampling rate [Hz]
     # Setting Rx sps to be an integer divisor of Tx sps to avoid fractional sps issues during resampling in RX DSP
-    p['sps_rx'] = 8  # Target integer SPS for DBP and Matched Filter
+    # This is the target SPS for DBP and Matched Filter. 
+    # A higher value corresponds to a wider subband and more accurate DBP, but also higher computational cost.
+    p['sps_rx'] = 8  
     # Prevent requesting a subband wider than the original fullband signal
     # if p['sps_rx'] > p['sps']:
     #     p['sps_rx'] = p['sps'] 
