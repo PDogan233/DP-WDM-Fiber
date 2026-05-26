@@ -105,53 +105,6 @@ def plot_constellation_grid(data, title='Constellations'):
     fig.tight_layout()
 
 
-def plot_h_phase(model, Nsub, fs_sub, fch, L_span, alpha_dBpm, beta2, beta3,
-                 steps_per_span, title='H Filter Phase vs Frequency'):
-    """
-    Overlay all linear layers' learned H phase on a single plot,
-    with the ideal (physical-init) H phase as a thick black reference line.
-
-    Dispersion compensation filters should have flat magnitude and parabolic
-    phase across frequency. This plot reveals how LDBP adjusts the phase.
-    """
-    # Frequency grid
-    df_sub = fs_sub / Nsub
-    f_ghz = (np.arange(-Nsub / 2, Nsub / 2) * df_sub) / 1e9
-    omega = 2 * np.pi * (np.arange(-Nsub / 2, Nsub / 2) * df_sub + fch)
-
-    # Ideal H from physical formula
-    alpha_np = np.log(10 ** (alpha_dBpm / 10))
-    beta_omega = 0.5 * beta2 * omega**2 + (1.0 / 6.0) * beta3 * omega**3
-    h_dbp = -L_span / steps_per_span
-    H_ideal = np.exp((-alpha_np / 2) * h_dbp - 1j * beta_omega * h_dbp)
-    ideal_phase = np.unwrap(np.angle(H_ideal))
-
-    fig, ax = plt.subplots(figsize=(10, 5), num=title)
-
-    # Ideal reference
-    ax.plot(f_ghz, ideal_phase, 'k-', linewidth=2.5,
-            label='Ideal (physical init)')
-
-    # Overlay all learned layers
-    colors = plt.cm.viridis(np.linspace(0, 1, 8))
-    layer_idx = 0
-    for ly in model.layers:
-        if not (hasattr(ly, 'H_real') and hasattr(ly, 'H_imag')):
-            continue
-        H_learned = torch.complex(ly.H_real, ly.H_imag)
-        H_np = H_learned.detach().cpu().numpy().flatten()
-        learned_phase = np.unwrap(np.angle(H_np))
-        ax.plot(f_ghz, learned_phase, color=colors[layer_idx % len(colors)],
-                linewidth=0.6, alpha=0.7, label=f'Layer {layer_idx + 1}')
-        layer_idx += 1
-
-    ax.set_xlabel('Frequency (GHz)')
-    ax.set_ylabel('Phase (rad)')
-    ax.set_title(title)
-    ax.legend(fontsize=7, ncol=2)
-    ax.grid(True)
-    fig.tight_layout()
-
 
 def plot_ber_bars(ber_results, title='BER Comparison'):
     """

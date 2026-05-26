@@ -9,7 +9,7 @@ from dbp import dbp_subband
 from visualize import plot_wav_spec
 from ldbp import LDBP
 from ldbp_utils import (complex_np_to_torch, extract_subband, run_rx_chain,
-                        plot_constellation_grid, plot_h_phase, plot_ber_bars)
+                        plot_constellation_grid, plot_ber_bars)
 
 
 # =====================================================================
@@ -17,11 +17,12 @@ from ldbp_utils import (complex_np_to_torch, extract_subband, run_rx_chain,
 # =====================================================================
 
 cfg = {
-    'steps_per_span': 2,
+    'steps_per_span': 4,
     'trainable_gamma': True,
-    'num_epochs': 300,
+    'num_epochs': 8000,  # 6000
     'learning_rate': 1e-3,
-    'print_interval': 20,
+    'learning_rate_min': 5e-5,
+    'print_interval': 100,
 }
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -92,10 +93,12 @@ print(f"\nBuilding LDBP: Nspans={p['Nspans']}, "
       f"steps_per_span={cfg['steps_per_span']}, "
       f"trainable_gamma={cfg['trainable_gamma']}")
 
+# LDBP is initialized with MISMATCHED DSP params (the "wrong" starting point).
+# It must learn to converge toward the correct (physical) DBP label.
 model = LDBP(
     Nsub=Nsub, fs_sub=fs_sub, fch=fch,
     L_span=p['L_span'], alpha_dBpm=p['alpha_dBpm'],
-    beta2=p['beta2'], beta3=p['beta3'], gamma=p['gamma'],
+    beta2=p['beta2_DSP'], beta3=p['beta3_DSP'], gamma=p['gamma_DSP'],
     Nspans=p['Nspans'], steps_per_span=cfg['steps_per_span'],
     G_lin=p['G_lin'], trainable_gamma=cfg['trainable_gamma']
 ).to(DEVICE)
@@ -126,6 +129,9 @@ ber_x_ldbp_init_test, ber_y_ldbp_init_test, rx_sym_ldbp_init_test = run_rx_chain
 # 8. Training
 # =====================================================================
 optimizer = torch.optim.Adam(model.parameters(), lr=cfg['learning_rate'])
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    optimizer, T_max=cfg['num_epochs'], eta_min=cfg['learning_rate_min']
+)
 loss_history = []
 
 model.train()
@@ -136,14 +142,13 @@ for epoch in range(cfg['num_epochs']):
     loss = torch.mean(torch.abs(output - rx_wav_dbp_train_label_ts) ** 2)
     loss.backward()
     optimizer.step()
+    scheduler.step()
 
     loss_history.append(loss.item())
 
     if (epoch + 1) % cfg['print_interval'] == 0:
-        weight_norms = model.get_linear_weight_norms()
-        wn_str = ', '.join([f'{wn:.4f}' for wn in weight_norms])
         print(f"  Epoch {epoch+1:4d}/{cfg['num_epochs']}  |  "
-              f"Loss: {loss.item():.6e}  |  |H| mean: [{wn_str}]")
+              f"Loss: {loss.item():.6e}  |  lr: {scheduler.get_last_lr()[0]:.2e}")
 
 print(f"\nTraining done. Loss: {loss_history[0]:.6e} -> {loss_history[-1]:.6e}  "
       f"({loss_history[0]/loss_history[-1]:.1f}x reduction)")
@@ -234,12 +239,7 @@ plt.title(f"LDBP Training (steps_per_span={cfg['steps_per_span']}, "
 plt.grid(True)
 plt.tight_layout()
 
-# 12d. H filter phase: learned vs ideal (all layers overlaid)
-plot_h_phase(model, Nsub, fs_sub, fch,
-             p['L_span'], p['alpha_dBpm'],
-             p['beta2'], p['beta3'], cfg['steps_per_span'])
-
-# 12e. BER bar chart (log scale)
+# 12d. BER bar chart (log scale)
 plot_ber_bars([
     ('LDBP init\n(train)', ber_x_ldbp_init_train, ber_y_ldbp_init_train),
     ('LDBP final\n(train)', ber_x_ldbp_train, ber_y_ldbp_train),

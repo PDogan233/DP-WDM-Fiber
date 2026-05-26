@@ -13,7 +13,7 @@ def get_parameters():
     p = {}
     
     # --- Symbols Setting ---
-    p['Nsym'] = 2**12             # Number of QAM symbols per channel
+    p['Nsym'] = 2**15             # Number of QAM symbols per channel
     p['M'] = 16                   # 16-QAM modulation
     p['k'] = int(np.log2(p['M'])) # Bits per symbol
     p['Rs'] = 32e9                # Symbol rate [symbols/s]
@@ -85,6 +85,11 @@ def get_parameters():
     p['beta3'] = 0 * (p['lambda0']**2 / (2 * np.pi * c))**2 * (Dis_S + 2 * Dispersion / p['lambda0']) #  [s^3/m]
     p['gamma'] = 1 * 2 * np.pi * n2 / (p['lambda0'] * Aeff) # [1/(W*m)]
     p['pmd_coeff'] = 0 * 0.1e-12 / np.sqrt(1000)      # PMD coefficient [s/sqrt(m)]
+        
+    # Power
+    Pdbm_ch = 0
+    p['PinW_ch'] = 10 ** ((Pdbm_ch - 30) / 10)
+    
     
     # --- Numerical Parameters ---
     
@@ -100,7 +105,7 @@ def get_parameters():
     
     # DSP Mismatch parameters (for testing robustness)
     eta1 = 0.0 * 1e-2
-    eta2 = 2 * 1e-2
+    eta2 = 1 * 1e-2
     eta3 = 0.0 * 1e-2
     eta4 = 0.0 * 1e-2
     p['beta1_DSP'] = (1 + eta1) * p['beta1']
@@ -108,11 +113,7 @@ def get_parameters():
     p['beta3_DSP'] = (1 + eta3) * p['beta3']
     p['gamma_DSP'] = (1 + eta4) * p['gamma']
     p['dz_DBP'] = 1 * p['dz']
-
-    # Power
-    Pdbm_ch = 0
-    p['PinW_ch'] = 10 ** ((Pdbm_ch - 30) / 10)
-    
+   
     
     # Amplifier parameters
     G_dB = p['alpha_dBpm'] * p['L_span']

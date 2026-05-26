@@ -5,4 +5,4 @@
 # .gitignore
 *.pyc
 simulation_version_log.docx
-
+*.pth

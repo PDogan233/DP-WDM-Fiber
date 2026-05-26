@@ -5,36 +5,63 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Overview
 This is a Python optical communication simulation for **Dual-Polarization WDM 16-QAM** systems. It models the full transceiver chain: TX pulse-shaping and WDM multiplexing → fiber propagation (Split-Step Fourier Method with Manakov equation) → EDFA amplification → RX DSP with Digital Back Propagation (DBP) for nonlinearity compensation.
 
+Two DBP approaches are implemented: **analytical DBP** (physics-based, fine step resolution) and **Learned DBP / LDBP** (parameterized as a neural network in PyTorch, coarser steps, trainable frequency-domain filters).
+
 The codebase is a MATLAB-to-Python port. NumPy/SciPy conventions are preferred over writing loops.
 
 ## Running the simulation
 
 ```bash
-# Stable simulation (modular, current)
+# Original simulation (modular, all channels)
 python main_simu_v4.py
 
-# Test simulation (smaller scope)
+# Original simulation (smaller scope)
 python main_simu_test.py
+
+# LDBP training + evaluation (center channel only, GPU)
+python main_ldbp_test.py
 ```
 
-There is no build step, no test runner, and no package manager required. Standard scientific Python stack: `numpy`, `scipy`, `matplotlib`, `torch`.
+Python environment: `E:\Anaconda3\envs\pytorch251` (PyTorch 2.5.1, CUDA 12.1, 2× RTX 3080).
 
 ## Architecture
 
 ### Signal format convention
 Dual-polarization signals use `(Nt, 2)` complex NumPy arrays: column 0 = X-pol, column 1 = Y-pol. Frequency-domain arrays follow `fftshift` ordering (DC at center).
 
+### Variable naming convention (LDBP scripts)
+```
+{domain}_{level}_{dsp}_{role}[_ts]
+
+  domain: tx (transmitted) / rx (received)
+   level: wav (waveform, before decimator) / sym (symbol, after decimator)
+     dsp: ch (after channel) / sub (after subband) / dbp (after true DBP) / ldbp (after LDBP)
+    role: train / test / label (ground truth)
+      ts: suffix for torch tensor (omit for numpy)
+
+Examples:
+  tx_wav_train          TX fullband waveform, train set (numpy)
+  rx_wav_ch_train       RX after channel, train set (numpy)
+  rx_wav_sub_train      After subband extraction, train set (numpy)
+  rx_wav_dbp_train_label  True DBP output = training label (numpy)
+  rx_wav_sub_train_ts   Same as rx_wav_sub_train but torch tensor on GPU
+  rx_sym_ldbp_test      Symbol-level after LDBP + RX chain, test set (numpy)
+```
+
 ### Module map
 
 | File | Role |
 |---|---|
-| `para.py` | Single `get_parameters()` function returning all system params as a dict. This is the **central configuration** — simulation scripts import this first. |
+| `para.py` | Single `get_parameters()` function returning all system params as a dict. **Central configuration**. Includes DSP mismatch params (eta1-eta4) for robustness testing. |
 | `tx_DSP.py` | 16-QAM modulation, RRC pulse shaping, power normalization, WDM frequency multiplexing. Entry point: `multiplex_wdm_channels(p)`. |
-| `channel.py` | Fiber propagation via SSFM (Manakov equation) + EDFA amplification with ASE noise. Entry point: `channel_propagation(E_tx, p)`. Supports adaptive step-size control (`constant`, `local_error`, `global_error`) and optional PMD. |
-| `dbp.py` | Digital Back Propagation — inverse fiber propagation for nonlinearity compensation. `dbp_subband()` operates on the already-downsampled subband (preferred path). `dbp_fullband_to_subband()` extracts a subband by bandwidth, runs DBP, and reconstructs the fullband (legacy path). |
+| `channel.py` | Fiber propagation via SSFM (Manakov equation) + EDFA amplification with ASE noise. Entry point: `channel_propagation(E_tx, p)`. Supports adaptive step-size control and optional PMD. |
+| `dbp.py` | Analytical DBP — inverse SSFM with fine step resolution. `dbp_subband()` operates on the downsampled subband. `dbp_fullband_to_subband()` is a legacy fullband path. Uses symmetric SSF: NL(h/2) → Linear(h) → NL(h/2). |
 | `rx_DSP.py` | Matched filtering, subband extraction (`subband_convert`), clock recovery (`decimator` — variance-based timing), frame sync, phase derotation, power normalization, 16-QAM demodulation. |
 | `utils.py` | `sync_align()` (cross-correlation alignment), `rcosdesign()` (RRC filter — equivalent to MATLAB's `rcosdesign`). |
 | `visualize.py` | Constellation diagrams, waveform plots, frequency spectra. |
+| `ldbp.py` | **Learned DBP** — PyTorch `nn.Module`. Alternating `LDBP_LinearLayer` (learnable frequency-domain filter `H`) and `LDBP_NonlinearLayer` (Manakov Kerr, optionally learnable `gamma`). Structure per step: Linear → Nonlinear (no symmetric SSF). EDFA gain removal between spans is fixed. |
+| `ldbp_utils.py` | Helpers for LDBP training: `complex_np_to_torch`, `extract_subband`, `run_rx_chain`, `plot_constellation_grid`, `plot_ber_bars`, `plot_h_phase`. |
+| `main_ldbp_test.py` | LDBP training + evaluation script. Center channel only. Trains LDBP (initialized with mismatched DSP params) to match true DBP output (matched physical params). |
 
 ### Data flow (main_simu_v4.py / main_simu_test.py)
 1. `get_parameters()` → params dict `p`
@@ -51,11 +78,36 @@ Dual-polarization signals use `(Nt, 2)` complex NumPy arrays: column 0 = X-pol, 
    - `normalize_rx_power()` → power normalization
    - `demodulate_16qam()` → symbol-to-bit decision, BER calculation
 
+### Data flow (main_ldbp_test.py)
+1. `get_parameters()` → params dict `p`
+2. Generate train/test datasets (seed=42/99)
+3. `extract_subband()` → subband signal + dimensions (center channel only)
+4. True DBP (`dbp_subband` with physical params) → label
+5. `complex_np_to_torch()` → GPU tensors
+6. Build LDBP model (initialized with **mismatched** DSP params `beta2_DSP`, `gamma_DSP`)
+7. Training loop: LDBP output vs true DBP label → MSE loss → Adam optimizer
+8. Evaluation: `run_rx_chain()` → BER + constellation, both before and after training
+9. Plots: waveform/spectrum, constellation grid, loss curve, BER bars
+
+### LDBP vs analytical DBP design differences
+
+| Aspect | Analytical DBP (`dbp.py`) | LDBP (`ldbp.py`) |
+|---|---|---|
+| Step structure | Symmetric SSF: NL/2 → Linear → NL/2 | Asymmetric: Linear → Nonlinear |
+| Steps per span | ~50 (dz=2km) | Configurable, typ. 1-5 |
+| Linear operator | `H = exp((-α/2)h - j·β(ω)·h)` | Learnable `H_real`, `H_imag` parameters |
+| Nonlinear operator | Fixed `(8/9)*gamma` | Optionally learnable `gamma` |
+| EDFA removal | `x / sqrt(G_lin)` | Same, fixed |
+| Framework | NumPy | PyTorch (GPU, autograd) |
+
 ### Key design decisions
-- **TX SPS is forced to a power of 2** (`sps = 2**ceil(log2(...))`) so that `subband_convert` always produces an integer SPS after resampling, avoiding fractional-SPS timing drift in the matched filter and decimator stages. See `para.py` line 39.
-- **DBP operates on the subband** (not the fullband), which is more computationally efficient. The subband SPS (e.g., 2 or 8) is the target resolution for DBP and matched filtering.
-- The `decimator` uses variance-based timing extraction: it finds the sampling phase that maximizes signal variance via spline interpolation, then applies a fractional-delay skew before decimation.
+- **TX SPS is forced to a power of 2** so that `subband_convert` always produces an integer SPS, avoiding fractional-SPS timing drift. See `para.py`.
+- **DBP operates on the subband** (not fullband), which is more computationally efficient.
+- **LDBP is initialized from physical formula** (with mismatch if DSP params differ), then fine-tuned via gradient descent to compensate for both the mismatch and the coarse step approximation.
+- **LDBP training target** is the true DBP output (matched physical params, fine steps), not the TX symbols, avoiding the need for differentiable clock recovery and demodulation.
 
 ## Notes
-- `torch` is imported in `dbp.py` but not actively used; it's included for potential ML-based DBP training paths.
 - PMD is implemented but disabled by default (`pmd_coeff = 0` in `para.py`).
+- `beta3` is set to 0 in `para.py` for simplified testing.
+- DSP mismatch params (eta1-eta4) control the initialization error for LDBP robustness testing.
+- The `decimator` and `sync_align` functions use non-differentiable operations (argmax, spline interpolation) and are only used for evaluation, not during LDBP training.
