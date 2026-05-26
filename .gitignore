@@ -6,3 +6,4 @@
 *.pyc
 simulation_version_log.docx
 *.pth
+*.npz

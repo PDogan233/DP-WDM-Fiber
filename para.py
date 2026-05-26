@@ -104,14 +104,14 @@ def get_parameters():
     p['dz'] = 2e3                 # backup SSF step size
     
     # DSP Mismatch parameters (for testing robustness)
-    eta1 = 0.0 * 1e-2
-    eta2 = 1 * 1e-2
-    eta3 = 0.0 * 1e-2
-    eta4 = 0.0 * 1e-2
-    p['beta1_DSP'] = (1 + eta1) * p['beta1']
-    p['beta2_DSP'] = (1 + eta2) * p['beta2']
-    p['beta3_DSP'] = (1 + eta3) * p['beta3']
-    p['gamma_DSP'] = (1 + eta4) * p['gamma']
+    p['eta1'] = 0.0 * 1e-2
+    p['eta2'] = 1.5 * 1e-2
+    p['eta3'] = 0.0 * 1e-2
+    p['eta4'] = 0.0 * 1e-2
+    p['beta1_DSP'] = (1 + p['eta1']) * p['beta1']
+    p['beta2_DSP'] = (1 + p['eta2']) * p['beta2']
+    p['beta3_DSP'] = (1 + p['eta3']) * p['beta3']
+    p['gamma_DSP'] = (1 + p['eta4']) * p['gamma']
     p['dz_DBP'] = 1 * p['dz']
    
     

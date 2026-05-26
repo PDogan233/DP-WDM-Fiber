@@ -5,7 +5,6 @@ import torch
 from rx_DSP import (apply_matched_filter, compensate_phase, normalize_rx_power,
                     decimator, demodulate_16qam, subband_convert)
 from utils import sync_align
-from dbp import dbp_subband
 
 
 # =====================================================================
@@ -34,7 +33,7 @@ def extract_subband(rx_wav_ch, p, fch):
     return rx_wav_sub, Nsub, fs_sub, sps_sub
 
 
-def run_rx_chain(rx_wav_in, tx_data, p, m, sps_sub, rrc_taps_rx):
+def rx_after_dbp(rx_wav_in, tx_data, p, m, sps_sub, rrc_taps_rx):
     """
     Standard RX DSP chain on DBP/LDBP output (waveform level).
     Steps: matched filter -> decimator -> sync -> phase derotate -> power norm -> demod.

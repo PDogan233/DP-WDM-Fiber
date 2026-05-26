@@ -9,6 +9,8 @@ Two DBP approaches are implemented: **analytical DBP** (physics-based, fine step
 
 The codebase is a MATLAB-to-Python port. NumPy/SciPy conventions are preferred over writing loops.
 
+**Main scripts (`main_*.py`) must not contain `def` statements.** All helper functions go into dedicated modules.
+
 ## Running the simulation
 
 ```bash
@@ -60,8 +62,10 @@ Examples:
 | `utils.py` | `sync_align()` (cross-correlation alignment), `rcosdesign()` (RRC filter — equivalent to MATLAB's `rcosdesign`). |
 | `visualize.py` | Constellation diagrams, waveform plots, frequency spectra. |
 | `ldbp.py` | **Learned DBP** — PyTorch `nn.Module`. Alternating `LDBP_LinearLayer` (learnable frequency-domain filter `H`) and `LDBP_NonlinearLayer` (Manakov Kerr, optionally learnable `gamma`). Structure per step: Linear → Nonlinear (no symmetric SSF). EDFA gain removal between spans is fixed. |
-| `ldbp_utils.py` | Helpers for LDBP training: `complex_np_to_torch`, `extract_subband`, `run_rx_chain`, `plot_constellation_grid`, `plot_ber_bars`, `plot_h_phase`. |
-| `main_ldbp_test.py` | LDBP training + evaluation script. Center channel only. Trains LDBP (initialized with mismatched DSP params) to match true DBP output (matched physical params). |
+| `ldbp_utils.py` | Helpers for LDBP training: `complex_np_to_torch`, `extract_subband`, `rx_after_dbp`, `plot_constellation_grid`, `plot_ber_bars`. |
+| `data_cache.py` | Simulation data caching: `build_cache_path`, `save_sim_cache`, `load_sim_cache`. Saves SSFM results to `data/` to skip recomputation when parameters haven't changed. |
+| `model_cache.py` | Model checkpoint caching: `build_model_dir`, `build_model_filename`, `save_model_cache`, `load_model_cache`. Saves trained LDBP weights + results to `model/<system>/` for reuse. |
+| `main_ldbp_test.py` | LDBP training + evaluation script. Center channel only. Trains LDBP (initialized with mismatched DSP params) to match true DBP output (matched physical params). Uses `data_cache.py` to skip SSFM and `model_cache.py` to skip training when results already exist. |
 
 ### Data flow (main_simu_v4.py / main_simu_test.py)
 1. `get_parameters()` → params dict `p`
@@ -80,14 +84,15 @@ Examples:
 
 ### Data flow (main_ldbp_test.py)
 1. `get_parameters()` → params dict `p`
-2. Generate train/test datasets (seed=42/99)
-3. `extract_subband()` → subband signal + dimensions (center channel only)
-4. True DBP (`dbp_subband` with physical params) → label
+2. `build_cache_path(p, 42, 99)` → check `data/` for cached `.npz`
+3. If cache hit: `load_sim_cache()` with param validation → skip to step 5
+4. If cache miss: generate train/test datasets (seed=42/99), extract subband, compute True DBP labels, then `save_sim_cache()`
 5. `complex_np_to_torch()` → GPU tensors
 6. Build LDBP model (initialized with **mismatched** DSP params `beta2_DSP`, `gamma_DSP`)
-7. Training loop: LDBP output vs true DBP label → MSE loss → Adam optimizer
-8. Evaluation: `run_rx_chain()` → BER + constellation, both before and after training
-9. Plots: waveform/spectrum, constellation grid, loss curve, BER bars
+7. `build_model_dir()` + `build_model_filename()` → check `model/<system>/` for trained checkpoint
+8. If model cache hit: `load_model_cache()` → restore weights, skip to step 10
+9. If model cache miss: training loop (Adam + CosineAnnealingLR) → evaluation → `save_model_cache()`
+10. BER summary, plots (constellation grid, loss curve, BER bars)
 
 ### LDBP vs analytical DBP design differences
 
