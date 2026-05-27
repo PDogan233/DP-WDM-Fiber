@@ -13,7 +13,7 @@ def get_parameters():
     p = {}
     
     # --- Symbols Setting ---
-    p['Nsym'] = 2**15             # Number of QAM symbols per channel
+    p['Nsym'] = 2**16             # Number of QAM symbols per channel
     p['M'] = 16                   # 16-QAM modulation
     p['k'] = int(np.log2(p['M'])) # Bits per symbol
     p['Rs'] = 32e9                # Symbol rate [symbols/s]
@@ -43,8 +43,8 @@ def get_parameters():
     # A higher value corresponds to a wider subband and more accurate DBP, but also higher computational cost.
     p['sps_rx'] = 8  
     # Prevent requesting a subband wider than the original fullband signal
-    # if p['sps_rx'] > p['sps']:
-    #     p['sps_rx'] = p['sps'] 
+    if p['sps_rx'] > p['sps']:
+        p['sps_rx'] = p['sps'] 
     
     # Time and Frequency grids
     p['Nt'] = 2 ** int(np.ceil(np.log2((p['Nsym'] + 50) * p['sps'])))
@@ -105,7 +105,7 @@ def get_parameters():
     
     # DSP Mismatch parameters (for testing robustness)
     p['eta1'] = 0.0 * 1e-2
-    p['eta2'] = 1.5 * 1e-2
+    p['eta2'] = 1 * 1e-2
     p['eta3'] = 0.0 * 1e-2
     p['eta4'] = 0.0 * 1e-2
     p['beta1_DSP'] = (1 + p['eta1']) * p['beta1']

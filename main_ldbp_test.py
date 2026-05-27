@@ -21,9 +21,9 @@ from model_cache import build_model_dir, build_model_filename, save_model_cache,
 # =====================================================================
 
 cfg = {
-    'steps_per_span': 8,
+    'steps_per_span': 10,
     'trainable_gamma': True,
-    'num_epochs': 10000,  # 6000
+    'num_epochs': 1000,  # 6000
     'learning_rate': 1e-3,
     'learning_rate_min': 1e-4,
     'print_interval': 100,
