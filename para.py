@@ -13,7 +13,7 @@ def get_parameters():
     p = {}
     
     # --- Symbols Setting ---
-    p['Nsym'] = 2**16             # Number of QAM symbols per channel
+    p['Nsym'] = 2**13             # Number of QAM symbols per channel
     p['M'] = 16                   # 16-QAM modulation
     p['k'] = int(np.log2(p['M'])) # Bits per symbol
     p['Rs'] = 32e9                # Symbol rate [symbols/s]
@@ -71,7 +71,7 @@ def get_parameters():
     
     # Fiber parameters
     p['L_span'] = 100e3           # Fiber length per span [m]
-    p['Nspans'] = 8              # Number of spans
+    p['Nspans'] = 4              # Number of spans
     p['alpha_dBpm'] = 0.2e-3      # Loss [dB/m]
    
     GroupRef = 1.47               # group refractive index
@@ -105,7 +105,7 @@ def get_parameters():
     
     # DSP Mismatch parameters (for testing robustness)
     p['eta1'] = 0.0 * 1e-2
-    p['eta2'] = 1 * 1e-2
+    p['eta2'] = -2 * 1e-2
     p['eta3'] = 0.0 * 1e-2
     p['eta4'] = 0.0 * 1e-2
     p['beta1_DSP'] = (1 + p['eta1']) * p['beta1']

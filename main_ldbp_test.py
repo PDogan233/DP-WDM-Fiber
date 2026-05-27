@@ -11,7 +11,8 @@ from dbp import dbp_subband
 from visualize import plot_wav_spec
 from ldbp import LDBP
 from ldbp_utils import (complex_np_to_torch, extract_subband, rx_after_dbp,
-                        plot_constellation_grid, plot_ber_bars)
+                        plot_constellation_grid, plot_ber_bars,
+                        plot_h_vs_ideal, plot_h_vs_init)
 from data_cache import build_cache_path, save_sim_cache, load_sim_cache
 from model_cache import build_model_dir, build_model_filename, save_model_cache, load_model_cache
 
@@ -23,11 +24,13 @@ from model_cache import build_model_dir, build_model_filename, save_model_cache,
 cfg = {
     'steps_per_span': 10,
     'trainable_gamma': True,
-    'num_epochs': 1000,  # 6000
+    'num_epochs': 500,  # 6000
     'learning_rate': 1e-3,
     'learning_rate_min': 1e-4,
     'print_interval': 100,
     'use_cache': True,
+    'h_plot_layers': [10, 20, 30, 40, 50, 60],
+    'h_plot_ds': 1000,
 }
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -341,6 +344,16 @@ plot_ber_bars([
     ('LDBP final\n(test)', ber_x_ldbp_test, ber_y_ldbp_test),
     ('True DBP\n(test)', ber_x_dbp_test_label, ber_y_dbp_test_label),
 ])
+
+# 12e. H filter analysis: learned vs ideal (physical params)
+plot_h_vs_ideal(model, Nsub, fs_sub, fch, p, cfg,
+                layer_indices=cfg['h_plot_layers'],
+                downsample=cfg['h_plot_ds'])
+
+# 12f. H filter analysis: learned vs initial (DSP-mismatched params)
+plot_h_vs_init(model, Nsub, fs_sub, fch, p, cfg,
+               layer_indices=cfg['h_plot_layers'],
+               downsample=cfg['h_plot_ds'])
 
 plt.ioff()
 plt.show()

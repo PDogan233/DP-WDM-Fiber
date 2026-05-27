@@ -105,6 +105,240 @@ def plot_constellation_grid(data, title='Constellations'):
 
 
 
+# =====================================================================
+# H-filter visualization helpers
+# =====================================================================
+
+def _compute_h_one_step(Nsub, fs_sub, fch, L_span, alpha_dBpm,
+                        beta2, beta3, steps_per_span):
+    """
+    Compute the frequency-domain filter H for a single DBP step.
+
+    H(omega) = exp((-alpha/2) * h - j * beta(omega) * h)
+    where beta(omega) = 0.5*beta2*omega^2 + (1/6)*beta3*omega^3
+    and h = -L_span / steps_per_span (negative = back-propagation).
+
+    Returns (f_ghz, H) where f_ghz is length-Nsub in GHz.
+    """
+    df_sub = fs_sub / Nsub
+    f_sub = np.arange(-Nsub / 2, Nsub / 2) * df_sub
+    f_full = f_sub + fch  # absolute optical frequency
+    omega = 2 * np.pi * f_full
+
+    alpha_np = np.log(10 ** (alpha_dBpm / 10))
+    beta_omega = 0.5 * beta2 * omega**2 + (1.0 / 6.0) * beta3 * omega**3
+
+    h_dbp = -L_span / steps_per_span
+    H = np.exp((-alpha_np / 2) * h_dbp - 1j * beta_omega * h_dbp)
+
+    f_ghz = f_full / 1e9
+    return f_ghz, H
+
+
+def _extract_learned_h(model, layer_indices):
+    """
+    Extract learned H from specified linear layers.
+
+    layer_indices: list of 1-based indices, e.g. [1, 2, 5].
+                   If None, extract all linear layers.
+
+    Returns list of (layer_idx, H_numpy) tuples.
+    H_numpy is a 1D complex array of length Nsub.
+    """
+    result = []
+    idx = 0
+    for layer in model.layers:
+        if hasattr(layer, 'H_real') and hasattr(layer, 'H_imag'):
+            idx += 1
+            if layer_indices is None or idx in layer_indices:
+                H = torch.complex(layer.H_real, layer.H_imag)
+                H_np = H.detach().cpu().numpy().flatten()
+                result.append((idx, H_np))
+    return result
+
+
+# -------------------------------------------------------------------
+# Small per-row helpers for the 3x2 H comparison figures.
+# Each helper fills one row: left = raw overlay, right = residual.
+# -------------------------------------------------------------------
+
+def _block_downsample(arr, factor):
+    """
+    Downsample by averaging every `factor` contiguous points.
+
+    This naturally smooths high-frequency numerical noise (e.g. phase
+    wrapping artifacts at the 1e-3 rad level) that strided decimation
+    would preserve.
+    """
+    n = len(arr) // factor * factor
+    return np.mean(arr[:n].reshape(-1, factor), axis=1)
+
+
+def _plot_phase_row(ax_raw, ax_res, f_ghz, ref_H, ref_label, items, colors, ds):
+    """Row 1: unwrapped phase overlay (left) + phase residual (right)."""
+    ref_phase = np.unwrap(np.angle(ref_H))
+
+    # Left: raw phase
+    ax_raw.plot(f_ghz, ref_phase, 'k--', linewidth=0.8, label=ref_label)
+    for ci, (ly_idx, H_full) in enumerate(items):
+        Hd = _block_downsample(H_full, ds)
+        ax_raw.plot(f_ghz, np.unwrap(np.angle(Hd)), color=colors[ci],
+                    linewidth=0.5, label=f'Layer {ly_idx}')
+    ax_raw.set_ylabel('Phase (rad)')
+    ax_raw.legend(fontsize=5, ncol=4)
+    ax_raw.grid(True)
+
+    # Right: phase residual.
+    # Both curves are individually unwrapped (proven smooth in the
+    # left panel), then subtracted.  This avoids any subtle issues
+    # from computing the angle of a complex product.
+    for ci, (ly_idx, H_full) in enumerate(items):
+        Hd = _block_downsample(H_full, ds)
+        residual = np.unwrap(np.angle(Hd)) - ref_phase
+        ax_res.plot(f_ghz, residual, color=colors[ci], linewidth=0.5,
+                    label=f'Layer {ly_idx}')
+    ax_res.axhline(y=0, color='gray', linewidth=0.5, linestyle=':')
+    ax_res.set_ylabel('Phase diff (rad)')
+    ax_res.legend(fontsize=5, ncol=4)
+    ax_res.grid(True)
+
+
+def _plot_real_row(ax_raw, ax_res, f_ghz, ref_H, ref_label, items, colors, ds):
+    """Row 2: real-part overlay (left) + real-part residual (right)."""
+    # Left: raw real
+    ax_raw.plot(f_ghz, ref_H.real, 'k--', linewidth=0.8, label=ref_label)
+    for ci, (ly_idx, H_full) in enumerate(items):
+        Hd = _block_downsample(H_full, ds)
+        ax_raw.plot(f_ghz, Hd.real, color=colors[ci], linewidth=0.5,
+                    label=f'Layer {ly_idx}')
+    ax_raw.set_ylabel('Real(H)')
+    ax_raw.legend(fontsize=5, ncol=4)
+    ax_raw.grid(True)
+
+    # Right: real residual = Re(learned) - Re(ref)
+    for ci, (ly_idx, H_full) in enumerate(items):
+        Hd = _block_downsample(H_full, ds)
+        ax_res.plot(f_ghz, Hd.real - ref_H.real, color=colors[ci],
+                    linewidth=0.5, label=f'Layer {ly_idx}')
+    ax_res.axhline(y=0, color='gray', linewidth=0.5, linestyle=':')
+    ax_res.set_ylabel('Real(H) diff')
+    ax_res.legend(fontsize=5, ncol=4)
+    ax_res.grid(True)
+
+
+def _plot_imag_row(ax_raw, ax_res, f_ghz, ref_H, ref_label, items, colors, ds):
+    """Row 3: imag-part overlay (left) + imag-part residual (right)."""
+    # Left: raw imag
+    ax_raw.plot(f_ghz, ref_H.imag, 'k--', linewidth=0.8, label=ref_label)
+    for ci, (ly_idx, H_full) in enumerate(items):
+        Hd = _block_downsample(H_full, ds)
+        ax_raw.plot(f_ghz, Hd.imag, color=colors[ci], linewidth=0.5,
+                    label=f'Layer {ly_idx}')
+    ax_raw.set_xlabel('Frequency (GHz)')
+    ax_raw.set_ylabel('Imag(H)')
+    ax_raw.legend(fontsize=5, ncol=4)
+    ax_raw.grid(True)
+
+    # Right: imag residual = Im(learned) - Im(ref)
+    for ci, (ly_idx, H_full) in enumerate(items):
+        Hd = _block_downsample(H_full, ds)
+        ax_res.plot(f_ghz, Hd.imag - ref_H.imag, color=colors[ci],
+                    linewidth=0.5, label=f'Layer {ly_idx}')
+    ax_res.axhline(y=0, color='gray', linewidth=0.5, linestyle=':')
+    ax_res.set_xlabel('Frequency (GHz)')
+    ax_res.set_ylabel('Imag(H) diff')
+    ax_res.legend(fontsize=5, ncol=4)
+    ax_res.grid(True)
+
+
+def plot_h_vs_ideal(model, Nsub, fs_sub, fch, p, cfg,
+                    layer_indices=None, downsample=20):
+    """
+    3x2 figure: learned H vs ideal (physical-params) H.
+
+    Left column: raw overlay.  Right column: residual = learned - ideal.
+    """
+    f_ghz_full, H_ref = _compute_h_one_step(
+        Nsub, fs_sub, fch,
+        p['L_span'], p['alpha_dBpm'],
+        p['beta2'], p['beta3'],
+        cfg['steps_per_span'],
+    )
+    ds = downsample
+    f_ghz = _block_downsample(f_ghz_full, ds)
+    H_ref = _block_downsample(H_ref, ds)
+
+    items = _extract_learned_h(model, layer_indices)
+    if not items:
+        print("  plot_h_vs_ideal: no linear layers found, skipping.")
+        return
+    colors = plt.cm.viridis(np.linspace(0, 1, len(items)))
+
+    fig, axes = plt.subplots(3, 2, figsize=(10, 8),
+                             num='H: Learned vs Ideal')
+
+    _plot_phase_row(axes[0, 0], axes[0, 1], f_ghz, H_ref,
+                    'Ideal', items, colors, ds)
+    axes[0, 0].set_title('Phase: Learned vs Ideal')
+    axes[0, 1].set_title('Phase Residual')
+
+    _plot_real_row(axes[1, 0], axes[1, 1], f_ghz, H_ref,
+                   'Ideal', items, colors, ds)
+    axes[1, 0].set_title('Real Part: Learned vs Ideal')
+    axes[1, 1].set_title('Real Residual')
+
+    _plot_imag_row(axes[2, 0], axes[2, 1], f_ghz, H_ref,
+                   'Ideal', items, colors, ds)
+    axes[2, 0].set_title('Imag Part: Learned vs Ideal')
+    axes[2, 1].set_title('Imag Residual')
+
+    fig.tight_layout()
+
+
+def plot_h_vs_init(model, Nsub, fs_sub, fch, p, cfg,
+                   layer_indices=None, downsample=20):
+    """
+    3x2 figure: learned H vs initial (DSP-mismatched) H.
+
+    Left column: raw overlay.  Right column: residual = learned - init.
+    """
+    f_ghz_full, H_ref = _compute_h_one_step(
+        Nsub, fs_sub, fch,
+        p['L_span'], p['alpha_dBpm'],
+        p['beta2_DSP'], p['beta3_DSP'],
+        cfg['steps_per_span'],
+    )
+    ds = downsample
+    f_ghz = _block_downsample(f_ghz_full, ds)
+    H_ref = _block_downsample(H_ref, ds)
+
+    items = _extract_learned_h(model, layer_indices)
+    if not items:
+        print("  plot_h_vs_init: no linear layers found, skipping.")
+        return
+    colors = plt.cm.viridis(np.linspace(0, 1, len(items)))
+
+    fig, axes = plt.subplots(3, 2, figsize=(10, 8),
+                             num='H: Learned vs Initial')
+
+    _plot_phase_row(axes[0, 0], axes[0, 1], f_ghz, H_ref,
+                    'Init (DSP)', items, colors, ds)
+    axes[0, 0].set_title('Phase: Learned vs Initial')
+    axes[0, 1].set_title('Phase Residual')
+
+    _plot_real_row(axes[1, 0], axes[1, 1], f_ghz, H_ref,
+                   'Init (DSP)', items, colors, ds)
+    axes[1, 0].set_title('Real Part: Learned vs Initial')
+    axes[1, 1].set_title('Real Residual')
+
+    _plot_imag_row(axes[2, 0], axes[2, 1], f_ghz, H_ref,
+                   'Init (DSP)', items, colors, ds)
+    axes[2, 0].set_title('Imag Part: Learned vs Initial')
+    axes[2, 1].set_title('Imag Residual')
+
+    fig.tight_layout()
+
+
 def plot_ber_bars(ber_results, title='BER Comparison'):
     """
     Grouped bar chart of BER values in log scale.
