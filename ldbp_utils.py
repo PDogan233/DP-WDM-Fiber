@@ -344,22 +344,12 @@ def plot_h_vs_init(model, Nsub, fs_sub, fch, p, cfg,
     fig.tight_layout()
 
 
-def estimate_delta_beta2(model, Nsub, fs_sub, fch, p, cfg,
-                         layer_indices=None, downsample=20,
-                         fit_fmin_ghz=1.0, fit_fmax_ghz=30.0):
-    """
-    Print a comparison table of delta-beta2 estimates from three methods.
+# -------------------------------------------------------------------
+# Beta2 estimation helpers (shared pre-computation)
+# -------------------------------------------------------------------
 
-    M1 — regularized division:  db2(w) = dphi / (denom*w^2 + eps)
-          aggregated over trusted freq region (weighted by |H_init|^2).
-    M2 — phi_learned quadratic fit:  fit a*w^2 + b*w + c to phi(w)
-          in trusted region → beta2_eff = -2a/h → db2 = beta2_eff - beta2_DSP.
-    M3 — numerical 2nd-derivative:  db2(w) = -d^2(dphi)/dw^2 / h
-          aggregated same as M1.
-
-    Prints a table with true beta2, DSP beta2, theoretical delta, and
-    the estimated delta (or beta2) from each method.
-    """
+def _beta2_est_prep(model, Nsub, fs_sub, fch, p, cfg, layer_indices, downsample):
+    """Shared setup: compute frequency grid, H_init, layer phases."""
     f_ghz_full, H_init, h_dbp = _compute_h_one_step(
         Nsub, fs_sub, fch,
         p['L_span'], p['alpha_dBpm'],
@@ -372,80 +362,173 @@ def estimate_delta_beta2(model, Nsub, fs_sub, fch, p, cfg,
 
     items = _extract_learned_h(model, layer_indices)
     if not items:
-        print("  estimate_delta_beta2: no linear layers found, skipping.")
-        return
+        return None
 
     init_phase = np.unwrap(np.angle(H_init_ds))
     omega = 2 * np.pi * f_ghz * 1e9
-    omega_sq = omega ** 2
-    denom = -0.5 * h_dbp
-    weight = denom * omega_sq
-    eps_reg = np.max(np.abs(weight))
+    weight = (-0.5 * h_dbp) * (omega ** 2)
     domega = omega[1] - omega[0]
 
-    # Trusted frequency region
-    mask_fit = (np.abs(f_ghz) >= fit_fmin_ghz) & (np.abs(f_ghz) <= fit_fmax_ghz)
-    if mask_fit.sum() < 5:
-        print("  estimate_delta_beta2: too few points in fit window, skipping.")
-        return
-    wt_agg = np.abs(H_init_ds[mask_fit]) ** 2
-
-    m1_vals, m2_vals, m3_vals = [], [], []
-    for _, (_, H_full) in enumerate(items):
+    phases = {}
+    for ly_idx, H_full in items:
         Hd = _block_downsample(H_full, ds)
-        phi_learned = np.unwrap(np.angle(Hd))
-        phase_diff = phi_learned - init_phase
+        phases[ly_idx] = np.unwrap(np.angle(Hd))
 
-        # M1: regularized division, weighted mean over trusted region
-        db2_div = phase_diff[mask_fit] / (weight[mask_fit] + eps_reg)
-        m1_vals.append(np.average(db2_div, weights=wt_agg))
+    return {
+        'f_ghz': f_ghz, 'omega': omega, 'weight': weight, 'domega': domega,
+        'h_dbp': h_dbp, 'H_init_ds': H_init_ds, 'init_phase': init_phase,
+        'items': items, 'phases': phases,
+    }
 
-        # M2: phi_learned quadratic fit
-        a_l, _, _ = np.polyfit(omega[mask_fit], phi_learned[mask_fit], 2, w=wt_agg)
-        beta2_eff = -2.0 * a_l / h_dbp
-        m2_vals.append(beta2_eff - p['beta2_DSP'])
 
-        # M3: numerical 2nd-derivative, weighted mean over trusted region
+def estimate_beta2_m1(prep, p, fit_fmin_ghz, fit_fmax_ghz):
+    """M1: regularized division  db2 = dphi / (denom*w^2 + eps)."""
+    f_ghz = prep['f_ghz']; omega = prep['omega']; weight = prep['weight']
+    init_phase = prep['init_phase']; phases = prep['phases']
+    H_init_ds = prep['H_init_ds']; items = prep['items']
+
+    eps_reg = np.max(np.abs(weight))
+    mask = (np.abs(f_ghz) >= fit_fmin_ghz) & (np.abs(f_ghz) <= fit_fmax_ghz)
+    wt = np.abs(H_init_ds[mask]) ** 2
+
+    vals = []
+    for ly_idx, _ in items:
+        phase_diff = phases[ly_idx] - init_phase
+        db2 = phase_diff[mask] / (weight[mask] + eps_reg)
+        vals.append(np.average(db2, weights=wt))
+    return np.array(vals)
+
+
+def estimate_beta2_m3(prep, p, fit_fmin_ghz, fit_fmax_ghz):
+    """M3: numerical 2nd-derivative  db2 = -d^2(dphi)/dw^2 / h."""
+    f_ghz = prep['f_ghz']; omega = prep['omega']; domega = prep['domega']
+    h_dbp = prep['h_dbp']; init_phase = prep['init_phase']
+    phases = prep['phases']; H_init_ds = prep['H_init_ds']; items = prep['items']
+
+    mask = (np.abs(f_ghz) >= fit_fmin_ghz) & (np.abs(f_ghz) <= fit_fmax_ghz)
+    wt = np.abs(H_init_ds[mask]) ** 2
+
+    vals = []
+    for ly_idx, _ in items:
+        phase_diff = phases[ly_idx] - init_phase
         d2phi = np.empty_like(phase_diff)
-        d2phi[1:-1] = (phase_diff[2:] - 2 * phase_diff[1:-1] + phase_diff[:-2]) / (domega ** 2)
-        d2phi[0] = d2phi[1]
-        d2phi[-1] = d2phi[-2]
-        db2_deriv = d2phi[mask_fit] / (-h_dbp)
-        m3_vals.append(np.average(db2_deriv, weights=wt_agg))
+        d2phi[1:-1] = (phase_diff[2:] - 2*phase_diff[1:-1] + phase_diff[:-2]) / (domega**2)
+        d2phi[0] = d2phi[1]; d2phi[-1] = d2phi[-2]
+        db2 = d2phi[mask] / (-h_dbp)
+        vals.append(np.average(db2, weights=wt))
+    return np.array(vals)
+
+
+def estimate_beta2(model, Nsub, fs_sub, fch, p, cfg,
+                   layer_indices=None, downsample=20,
+                   fit_fmin_ghz=None, fit_fmax_ghz=None):
+    """
+    Estimate beta2 from learned H using quadratic fit on phi_learned(w).
+
+    Method (M2): fit  phi_learned = a*w^2 + b*w + c  in [f_min, f_max]
+    weighted by |H_init|^2, then  beta2_est = -2a/h_dbp.
+
+    Frequency limits default to system-dependent values:
+        f_min = Rs / 20       (1.6 GHz @ 32Gbaud)
+        f_max = Rs / 3        (10.7 GHz @ 32Gbaud)
+
+    Rationale:
+      - Below Rs/20  the quadratic signal dphi ~ w^2 is too small vs noise
+      - Rs/20 to Rs/3 is the "clean" region where |H_init| is near peak
+        and higher-order overfitting has not yet corrupted the phase
+      - Above Rs/3   non-physical learned ripple cancels the beta2 signal
+
+    The estimate is averaged across layers listed in layer_indices
+    (default [1]).  Use list(range(1, N)) for all layers 1 through N-1.
+
+    Returns (beta2_est, delta_beta2_est).
+    Also computes M1 + M3 for comparison if the prep data is cached.
+    """
+    Rs = p['Rs']
+    if fit_fmin_ghz is None:
+        fit_fmin_ghz = Rs / 20 / 1e9
+    if fit_fmax_ghz is None:
+        fit_fmax_ghz = Rs / 3 / 1e9
+    if layer_indices is None:
+        layer_indices = [1]
+
+    prep = _beta2_est_prep(model, Nsub, fs_sub, fch, p, cfg,
+                           layer_indices, downsample)
+    if prep is None:
+        print("  estimate_beta2: no linear layers found, skipping.")
+        return None, None
+
+    omega = prep['omega']; f_ghz = prep['f_ghz']
+    h_dbp = prep['h_dbp']; H_init_ds = prep['H_init_ds']
+    phases = prep['phases']; items = prep['items']
+
+    mask = (np.abs(f_ghz) >= fit_fmin_ghz) & (np.abs(f_ghz) <= fit_fmax_ghz)
+    if mask.sum() < 5:
+        print("  estimate_beta2: too few points in fit window, skipping.")
+        return None, None
+    wt = np.abs(H_init_ds[mask]) ** 2
+
+    # M2: phi_learned quadratic fit
+    beta2_vals = []
+    for ly_idx, _ in items:
+        a, _, _ = np.polyfit(omega[mask], phases[ly_idx][mask], 2, w=wt)
+        beta2_vals.append(-2.0 * a / h_dbp)
+    beta2_arr = np.array(beta2_vals)
+    beta2_est = np.mean(beta2_arr)
+    beta2_std = np.std(beta2_arr)
+
+    # M1 + M3 for comparison
+    m1_arr = estimate_beta2_m1(prep, p, fit_fmin_ghz, fit_fmax_ghz)
+    m3_arr = estimate_beta2_m3(prep, p, fit_fmin_ghz, fit_fmax_ghz)
 
     beta2_true = p['beta2']
     beta2_dsp = p['beta2_DSP']
     delta_true = beta2_true - beta2_dsp
-    eta2_pct = p['eta2'] * 100
+    delta_est = beta2_est - beta2_dsp
 
-    m1a = np.array(m1_vals)
-    m2a = np.array(m2_vals)
-    m3a = np.array(m3_vals)
+    err_init = abs(beta2_dsp - beta2_true)
+    err_curr = abs(beta2_est - beta2_true)
+    acc_improve = (1.0 - err_curr / err_init) * 100 if err_init > 0 else 0.0
+    acc_curr = (1.0 - err_curr / abs(beta2_true)) * 100
 
     print()
     print("=" * 70)
-    print("  Beta2 Estimation Summary  (|f| in [{:.0f}, {:.0f}] GHz)".format(
+    print("  Beta2 Estimation  (|f| in [{:.1f}, {:.1f}] GHz)".format(
         fit_fmin_ghz, fit_fmax_ghz))
     print("-" * 70)
-    print("  beta2 (true)       = {:.4e}  s^2/m".format(beta2_true))
-    print("  eta2               = {:+.1f} %".format(eta2_pct))
-    print("  Delta_beta2 (true) = {:.4e}  s^2/m".format(delta_true))
-    print("  beta2 (DSP init)   = {:.4e}  s^2/m".format(beta2_dsp))
+    print("  eta2                = {:+.1f} %".format(p['eta2'] * 100))
+    print("  beta2 (DSP init)    = {:.4e}  s^2/m".format(beta2_dsp))
+    print("  beta2 (true)        = {:.4e}  s^2/m".format(beta2_true))
+    print("  Delta_beta2 (true)  = {:.4e}  s^2/m".format(delta_true))
     print("-" * 70)
-    print("  Estimated Delta_beta2:")
-    print("    M1 (division)    : {:.4e} +/- {:.4e}  s^2/m".format(
-        np.mean(m1a), np.std(m1a)))
-    print("    M2 (phi fit)     : {:.4e} +/- {:.4e}  s^2/m".format(
-        np.mean(m2a), np.std(m2a)))
-    print("    M3 (derivative)  : {:.4e} +/- {:.4e}  s^2/m".format(
-        np.mean(m3a), np.std(m3a)))
+    print("  --- M2 (phi fit, primary) ---")
+    print("  beta2 (est)         = {:.4e} +/- {:.4e}  s^2/m".format(
+        beta2_est, beta2_std))
+    print("  Delta_beta2 (est)   = {:.4e}  s^2/m".format(delta_est))
+    print("  Accuracy improvement = {:+.2f} %".format(acc_improve))
+    print("  Current accuracy     = {:.4f} %".format(acc_curr))
     print("-" * 70)
-    print("  Estimated beta2:")
-    print("    M1 (division)    : {:.4e}  s^2/m".format(np.mean(m1a) + beta2_dsp))
-    print("    M2 (phi fit)     : {:.4e}  s^2/m".format(np.mean(m2a) + beta2_dsp))
-    print("    M3 (derivative)  : {:.4e}  s^2/m".format(np.mean(m3a) + beta2_dsp))
+    print("  --- M1 (division, reference) ---")
+    m1_est = np.mean(m1_arr) if len(m1_arr) > 0 else 0
+    m1_delta = m1_est
+    m1_acc = (1.0 - abs(m1_est - beta2_true) / abs(beta2_true)) * 100
+    print("  beta2 (est)         = {:.4e} +/- {:.4e}  s^2/m".format(
+        m1_est, np.std(m1_arr)))
+    print("  Delta_beta2 (est)   = {:.4e}  s^2/m".format(m1_delta))
+    print("  Current accuracy     = {:.4f} %".format(m1_acc))
+    print("-" * 70)
+    print("  --- M3 (derivative, reference) ---")
+    m3_est = np.mean(m3_arr) if len(m3_arr) > 0 else 0
+    m3_delta = m3_est
+    m3_acc = (1.0 - abs(m3_est - beta2_true) / abs(beta2_true)) * 100
+    print("  beta2 (est)         = {:.4e} +/- {:.4e}  s^2/m".format(
+        m3_est, np.std(m3_arr)))
+    print("  Delta_beta2 (est)   = {:.4e}  s^2/m".format(m3_delta))
+    print("  Current accuracy     = {:.4f} %".format(m3_acc))
     print("=" * 70)
     print()
+
+    return beta2_est, delta_est
 
 
 def plot_ber_bars(ber_results, title='BER Comparison'):

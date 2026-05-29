@@ -13,7 +13,7 @@ from ldbp import LDBP
 from ldbp_utils import (complex_np_to_torch, extract_subband, rx_after_dbp,
                         plot_constellation_grid, plot_ber_bars,
                         plot_h_vs_ideal, plot_h_vs_init,
-                        estimate_delta_beta2)
+                        estimate_beta2)
 from data_cache import build_cache_path, save_sim_cache, load_sim_cache
 from model_cache import build_model_dir, build_model_filename, save_model_cache, load_model_cache
 
@@ -23,14 +23,16 @@ from model_cache import build_model_dir, build_model_filename, save_model_cache,
 # =====================================================================
 
 cfg = {
-    'steps_per_span': 5,
+    'steps_per_span': 20,
     'trainable_gamma': True,
-    'num_epochs': 500,  # 6000
+    'num_epochs': 1000,  # 6000
     'learning_rate': 1e-3,
     'learning_rate_min': 1e-4,
     'print_interval': 100,
     'use_cache': True,
-    'h_plot_layers': [1],
+    # List of LDBP layer indices to plot H filter and estimate beta2 
+    # e.g., list(range(1, 41)), list(range(1, 101, 10))
+    'h_plot_layers': [1,10,20,30,40,50],  
     'h_plot_ds': 500,
 }
 
@@ -274,7 +276,14 @@ if not pretrained:
     )
 
 # =====================================================================
-# 10. BER summary
+# 10. Beta2 estimation
+# =====================================================================
+estimate_beta2(model, Nsub, fs_sub, fch, p, cfg,
+               layer_indices=cfg['h_plot_layers'],
+               downsample=cfg['h_plot_ds'])
+
+# =====================================================================
+# 11. BER summary
 # =====================================================================
 
 print("\n--- BER Summary ---")
@@ -290,7 +299,7 @@ print(f"  True DBP   (test) : X={ber_x_dbp_test_label:.3g}, "
       f"Y={ber_y_dbp_test_label:.3g}")
 
 # =====================================================================
-# 11. Generate constellation data (re-run evaluation if pretrained)
+# 12. Generate constellation data (re-run evaluation if pretrained)
 # =====================================================================
 if pretrained:
     print("\nRunning evaluation for plots...")
@@ -309,14 +318,14 @@ if pretrained:
         rx_wav_dbp_test_label, tx_data_test, p, m_center, sps_sub, p['rrc_taps_rx'])
 
 # =====================================================================
-# 12. Plots
+# 13. Plots
 # =====================================================================
 plt.ion()
 
-# 12a. Waveform & spectrum before/after channel
+# a. Waveform & spectrum before/after channel
 plot_wav_spec(p['t'], p['f'], tx_wav_train, rx_wav_ch_train)
 
-# 12b. Constellation grid
+# b. Constellation grid
 plot_constellation_grid([
     {'x': rx_sym_ldbp_init_train[:, 0], 'y': rx_sym_ldbp_init_train[:, 1],
      'label': 'LDBP init (train)'},
@@ -328,7 +337,7 @@ plot_constellation_grid([
      'label': 'True DBP (test)'},
 ])
 
-# 12c. Training loss curve
+# c. Training loss curve
 plt.figure('LDBP Training Loss', figsize=(8, 4))
 plt.semilogy(loss_history)
 plt.xlabel('Epoch')
@@ -338,7 +347,7 @@ plt.title(f"LDBP Training (steps_per_span={cfg['steps_per_span']}, "
 plt.grid(True)
 plt.tight_layout()
 
-# 12d. BER bar chart (log scale)
+# d. BER bar chart (log scale)
 plot_ber_bars([
     ('LDBP init\n(train)', ber_x_ldbp_init_train, ber_y_ldbp_init_train),
     ('LDBP final\n(train)', ber_x_ldbp_train, ber_y_ldbp_train),
@@ -346,20 +355,15 @@ plot_ber_bars([
     ('True DBP\n(test)', ber_x_dbp_test_label, ber_y_dbp_test_label),
 ])
 
-# 12e. H filter analysis: learned vs ideal (physical params)
+# e. H filter analysis: learned vs ideal (physical params)
 plot_h_vs_ideal(model, Nsub, fs_sub, fch, p, cfg,
                 layer_indices=cfg['h_plot_layers'],
                 downsample=cfg['h_plot_ds'])
 
-# 12f. H filter analysis: learned vs initial (DSP-mismatched params)
+# f. H filter analysis: learned vs initial (DSP-mismatched params)
 plot_h_vs_init(model, Nsub, fs_sub, fch, p, cfg,
                layer_indices=cfg['h_plot_layers'],
                downsample=cfg['h_plot_ds'])
-
-# 12g. Beta2 estimation summary (three methods, printed table)
-estimate_delta_beta2(model, Nsub, fs_sub, fch, p, cfg,
-                     layer_indices=cfg['h_plot_layers'],
-                     downsample=cfg['h_plot_ds'])
 
 plt.ioff()
 plt.show()
