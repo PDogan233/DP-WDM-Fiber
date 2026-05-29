@@ -12,7 +12,8 @@ from visualize import plot_wav_spec
 from ldbp import LDBP
 from ldbp_utils import (complex_np_to_torch, extract_subband, rx_after_dbp,
                         plot_constellation_grid, plot_ber_bars,
-                        plot_h_vs_ideal, plot_h_vs_init)
+                        plot_h_vs_ideal, plot_h_vs_init,
+                        estimate_delta_beta2)
 from data_cache import build_cache_path, save_sim_cache, load_sim_cache
 from model_cache import build_model_dir, build_model_filename, save_model_cache, load_model_cache
 
@@ -22,15 +23,15 @@ from model_cache import build_model_dir, build_model_filename, save_model_cache,
 # =====================================================================
 
 cfg = {
-    'steps_per_span': 10,
+    'steps_per_span': 5,
     'trainable_gamma': True,
     'num_epochs': 500,  # 6000
     'learning_rate': 1e-3,
     'learning_rate_min': 1e-4,
     'print_interval': 100,
     'use_cache': True,
-    'h_plot_layers': [10, 20, 30, 40, 50, 60],
-    'h_plot_ds': 1000,
+    'h_plot_layers': [1],
+    'h_plot_ds': 500,
 }
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -354,6 +355,11 @@ plot_h_vs_ideal(model, Nsub, fs_sub, fch, p, cfg,
 plot_h_vs_init(model, Nsub, fs_sub, fch, p, cfg,
                layer_indices=cfg['h_plot_layers'],
                downsample=cfg['h_plot_ds'])
+
+# 12g. Beta2 estimation summary (three methods, printed table)
+estimate_delta_beta2(model, Nsub, fs_sub, fch, p, cfg,
+                     layer_indices=cfg['h_plot_layers'],
+                     downsample=cfg['h_plot_ds'])
 
 plt.ioff()
 plt.show()

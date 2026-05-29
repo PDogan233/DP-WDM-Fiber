@@ -118,7 +118,8 @@ def _compute_h_one_step(Nsub, fs_sub, fch, L_span, alpha_dBpm,
     where beta(omega) = 0.5*beta2*omega^2 + (1/6)*beta3*omega^3
     and h = -L_span / steps_per_span (negative = back-propagation).
 
-    Returns (f_ghz, H) where f_ghz is length-Nsub in GHz.
+    Returns (f_ghz, H, h_dbp) where f_ghz is length-Nsub in GHz
+    and h_dbp is the (negative) back-propagation step.
     """
     df_sub = fs_sub / Nsub
     f_sub = np.arange(-Nsub / 2, Nsub / 2) * df_sub
@@ -132,7 +133,7 @@ def _compute_h_one_step(Nsub, fs_sub, fch, L_span, alpha_dBpm,
     H = np.exp((-alpha_np / 2) * h_dbp - 1j * beta_omega * h_dbp)
 
     f_ghz = f_full / 1e9
-    return f_ghz, H
+    return f_ghz, H, h_dbp
 
 
 def _extract_learned_h(model, layer_indices):
@@ -184,6 +185,7 @@ def _plot_phase_row(ax_raw, ax_res, f_ghz, ref_H, ref_label, items, colors, ds):
         Hd = _block_downsample(H_full, ds)
         ax_raw.plot(f_ghz, np.unwrap(np.angle(Hd)), color=colors[ci],
                     linewidth=0.5, label=f'Layer {ly_idx}')
+    ax_raw.set_xlabel('Frequency (GHz)')
     ax_raw.set_ylabel('Phase (rad)')
     ax_raw.legend(fontsize=5, ncol=4)
     ax_raw.grid(True)
@@ -198,6 +200,7 @@ def _plot_phase_row(ax_raw, ax_res, f_ghz, ref_H, ref_label, items, colors, ds):
         ax_res.plot(f_ghz, residual, color=colors[ci], linewidth=0.5,
                     label=f'Layer {ly_idx}')
     ax_res.axhline(y=0, color='gray', linewidth=0.5, linestyle=':')
+    ax_res.set_xlabel('Frequency (GHz)')
     ax_res.set_ylabel('Phase diff (rad)')
     ax_res.legend(fontsize=5, ncol=4)
     ax_res.grid(True)
@@ -211,6 +214,7 @@ def _plot_real_row(ax_raw, ax_res, f_ghz, ref_H, ref_label, items, colors, ds):
         Hd = _block_downsample(H_full, ds)
         ax_raw.plot(f_ghz, Hd.real, color=colors[ci], linewidth=0.5,
                     label=f'Layer {ly_idx}')
+    ax_raw.set_xlabel('Frequency (GHz)')
     ax_raw.set_ylabel('Real(H)')
     ax_raw.legend(fontsize=5, ncol=4)
     ax_raw.grid(True)
@@ -221,6 +225,7 @@ def _plot_real_row(ax_raw, ax_res, f_ghz, ref_H, ref_label, items, colors, ds):
         ax_res.plot(f_ghz, Hd.real - ref_H.real, color=colors[ci],
                     linewidth=0.5, label=f'Layer {ly_idx}')
     ax_res.axhline(y=0, color='gray', linewidth=0.5, linestyle=':')
+    ax_res.set_xlabel('Frequency (GHz)')
     ax_res.set_ylabel('Real(H) diff')
     ax_res.legend(fontsize=5, ncol=4)
     ax_res.grid(True)
@@ -258,7 +263,7 @@ def plot_h_vs_ideal(model, Nsub, fs_sub, fch, p, cfg,
 
     Left column: raw overlay.  Right column: residual = learned - ideal.
     """
-    f_ghz_full, H_ref = _compute_h_one_step(
+    f_ghz_full, H_ref, _ = _compute_h_one_step(
         Nsub, fs_sub, fch,
         p['L_span'], p['alpha_dBpm'],
         p['beta2'], p['beta3'],
@@ -302,7 +307,7 @@ def plot_h_vs_init(model, Nsub, fs_sub, fch, p, cfg,
 
     Left column: raw overlay.  Right column: residual = learned - init.
     """
-    f_ghz_full, H_ref = _compute_h_one_step(
+    f_ghz_full, H_ref, _ = _compute_h_one_step(
         Nsub, fs_sub, fch,
         p['L_span'], p['alpha_dBpm'],
         p['beta2_DSP'], p['beta3_DSP'],
@@ -337,6 +342,110 @@ def plot_h_vs_init(model, Nsub, fs_sub, fch, p, cfg,
     axes[2, 1].set_title('Imag Residual')
 
     fig.tight_layout()
+
+
+def estimate_delta_beta2(model, Nsub, fs_sub, fch, p, cfg,
+                         layer_indices=None, downsample=20,
+                         fit_fmin_ghz=1.0, fit_fmax_ghz=30.0):
+    """
+    Print a comparison table of delta-beta2 estimates from three methods.
+
+    M1 — regularized division:  db2(w) = dphi / (denom*w^2 + eps)
+          aggregated over trusted freq region (weighted by |H_init|^2).
+    M2 — phi_learned quadratic fit:  fit a*w^2 + b*w + c to phi(w)
+          in trusted region → beta2_eff = -2a/h → db2 = beta2_eff - beta2_DSP.
+    M3 — numerical 2nd-derivative:  db2(w) = -d^2(dphi)/dw^2 / h
+          aggregated same as M1.
+
+    Prints a table with true beta2, DSP beta2, theoretical delta, and
+    the estimated delta (or beta2) from each method.
+    """
+    f_ghz_full, H_init, h_dbp = _compute_h_one_step(
+        Nsub, fs_sub, fch,
+        p['L_span'], p['alpha_dBpm'],
+        p['beta2_DSP'], p['beta3_DSP'],
+        cfg['steps_per_span'],
+    )
+    ds = downsample
+    f_ghz = _block_downsample(f_ghz_full, ds)
+    H_init_ds = _block_downsample(H_init, ds)
+
+    items = _extract_learned_h(model, layer_indices)
+    if not items:
+        print("  estimate_delta_beta2: no linear layers found, skipping.")
+        return
+
+    init_phase = np.unwrap(np.angle(H_init_ds))
+    omega = 2 * np.pi * f_ghz * 1e9
+    omega_sq = omega ** 2
+    denom = -0.5 * h_dbp
+    weight = denom * omega_sq
+    eps_reg = np.max(np.abs(weight))
+    domega = omega[1] - omega[0]
+
+    # Trusted frequency region
+    mask_fit = (np.abs(f_ghz) >= fit_fmin_ghz) & (np.abs(f_ghz) <= fit_fmax_ghz)
+    if mask_fit.sum() < 5:
+        print("  estimate_delta_beta2: too few points in fit window, skipping.")
+        return
+    wt_agg = np.abs(H_init_ds[mask_fit]) ** 2
+
+    m1_vals, m2_vals, m3_vals = [], [], []
+    for _, (_, H_full) in enumerate(items):
+        Hd = _block_downsample(H_full, ds)
+        phi_learned = np.unwrap(np.angle(Hd))
+        phase_diff = phi_learned - init_phase
+
+        # M1: regularized division, weighted mean over trusted region
+        db2_div = phase_diff[mask_fit] / (weight[mask_fit] + eps_reg)
+        m1_vals.append(np.average(db2_div, weights=wt_agg))
+
+        # M2: phi_learned quadratic fit
+        a_l, _, _ = np.polyfit(omega[mask_fit], phi_learned[mask_fit], 2, w=wt_agg)
+        beta2_eff = -2.0 * a_l / h_dbp
+        m2_vals.append(beta2_eff - p['beta2_DSP'])
+
+        # M3: numerical 2nd-derivative, weighted mean over trusted region
+        d2phi = np.empty_like(phase_diff)
+        d2phi[1:-1] = (phase_diff[2:] - 2 * phase_diff[1:-1] + phase_diff[:-2]) / (domega ** 2)
+        d2phi[0] = d2phi[1]
+        d2phi[-1] = d2phi[-2]
+        db2_deriv = d2phi[mask_fit] / (-h_dbp)
+        m3_vals.append(np.average(db2_deriv, weights=wt_agg))
+
+    beta2_true = p['beta2']
+    beta2_dsp = p['beta2_DSP']
+    delta_true = beta2_true - beta2_dsp
+    eta2_pct = p['eta2'] * 100
+
+    m1a = np.array(m1_vals)
+    m2a = np.array(m2_vals)
+    m3a = np.array(m3_vals)
+
+    print()
+    print("=" * 70)
+    print("  Beta2 Estimation Summary  (|f| in [{:.0f}, {:.0f}] GHz)".format(
+        fit_fmin_ghz, fit_fmax_ghz))
+    print("-" * 70)
+    print("  beta2 (true)       = {:.4e}  s^2/m".format(beta2_true))
+    print("  eta2               = {:+.1f} %".format(eta2_pct))
+    print("  Delta_beta2 (true) = {:.4e}  s^2/m".format(delta_true))
+    print("  beta2 (DSP init)   = {:.4e}  s^2/m".format(beta2_dsp))
+    print("-" * 70)
+    print("  Estimated Delta_beta2:")
+    print("    M1 (division)    : {:.4e} +/- {:.4e}  s^2/m".format(
+        np.mean(m1a), np.std(m1a)))
+    print("    M2 (phi fit)     : {:.4e} +/- {:.4e}  s^2/m".format(
+        np.mean(m2a), np.std(m2a)))
+    print("    M3 (derivative)  : {:.4e} +/- {:.4e}  s^2/m".format(
+        np.mean(m3a), np.std(m3a)))
+    print("-" * 70)
+    print("  Estimated beta2:")
+    print("    M1 (division)    : {:.4e}  s^2/m".format(np.mean(m1a) + beta2_dsp))
+    print("    M2 (phi fit)     : {:.4e}  s^2/m".format(np.mean(m2a) + beta2_dsp))
+    print("    M3 (derivative)  : {:.4e}  s^2/m".format(np.mean(m3a) + beta2_dsp))
+    print("=" * 70)
+    print()
 
 
 def plot_ber_bars(ber_results, title='BER Comparison'):
