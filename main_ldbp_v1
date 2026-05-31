@@ -323,7 +323,7 @@ if pretrained:
 plt.ion()
 
 # a. Waveform & spectrum before/after channel
-# plot_wav_spec(p['t'], p['f'], tx_wav_train, rx_wav_ch_train)
+plot_wav_spec(p['t'], p['f'], tx_wav_train, rx_wav_ch_train)
 
 # b. Constellation grid
 plot_constellation_grid([
