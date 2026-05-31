@@ -13,9 +13,10 @@ from ldbp import LDBP
 from ldbp_utils import (complex_np_to_torch, extract_subband, rx_after_dbp,
                         plot_constellation_grid, plot_ber_bars,
                         plot_h_vs_ideal, plot_h_vs_init,
-                        estimate_beta2)
+                        estimate_beta2, estimate_gamma)
 from data_cache import build_cache_path, save_sim_cache, load_sim_cache
-from model_cache import build_model_dir, build_model_filename, save_model_cache, load_model_cache
+from model_cache import (build_model_dir, build_model_filename,
+                        save_model_cache, load_model_cache, CURRENT_CKPT_VERSION)
 
 
 # =====================================================================
@@ -156,28 +157,59 @@ pretrained = False
 if cfg.get('use_cache') and os.path.exists(model_path):
     print(f"\nLoading cached model from {model_path}...")
     ckpt = load_model_cache(model_path, cfg, p)
-    model.load_state_dict(ckpt['model_state_dict'])
-    model.eval()
-    pretrained = True
 
-    loss_history = ckpt['loss_history']
-    final_loss_train = ckpt['final_loss_train']
-    final_loss_test = ckpt['final_loss_test']
-    ber_x_ldbp_init_train = ckpt['ber_x_ldbp_init_train']
-    ber_y_ldbp_init_train = ckpt['ber_y_ldbp_init_train']
-    ber_x_ldbp_init_test = ckpt['ber_x_ldbp_init_test']
-    ber_y_ldbp_init_test = ckpt['ber_y_ldbp_init_test']
-    ber_x_ldbp_train = ckpt['ber_x_ldbp_train']
-    ber_y_ldbp_train = ckpt['ber_y_ldbp_train']
-    ber_x_ldbp_test = ckpt['ber_x_ldbp_test']
-    ber_y_ldbp_test = ckpt['ber_y_ldbp_test']
-    ber_x_dbp_test_label = ckpt['ber_x_dbp_test_label']
-    ber_y_dbp_test_label = ckpt['ber_y_dbp_test_label']
-    rx_sym_ldbp_init_train = ckpt['rx_sym_ldbp_init_train']
-    rx_sym_ldbp_init_test = ckpt['rx_sym_ldbp_init_test']
+    if ckpt.get('ckpt_version') != CURRENT_CKPT_VERSION:
+        print(f"  Checkpoint version mismatch "
+              f"(got {ckpt.get('ckpt_version')}, need {CURRENT_CKPT_VERSION}).")
+        print("  Will re-train and overwrite.")
+    else:
+        model.load_state_dict(ckpt['model_state_dict'])
+        model.eval()
+        pretrained = True
 
-    print(f"  Final loss (train): {final_loss_train:.6e}")
-    print(f"  Final loss (test) : {final_loss_test:.6e}")
+        loss_history = ckpt['loss_history']
+        final_loss_train = ckpt['final_loss_train']
+        final_loss_test = ckpt['final_loss_test']
+        ber_x_ldbp_init_train = ckpt['ber_x_ldbp_init_train']
+        ber_y_ldbp_init_train = ckpt['ber_y_ldbp_init_train']
+        ber_x_ldbp_init_test = ckpt['ber_x_ldbp_init_test']
+        ber_y_ldbp_init_test = ckpt['ber_y_ldbp_init_test']
+        ber_x_ldbp_train = ckpt['ber_x_ldbp_train']
+        ber_y_ldbp_train = ckpt['ber_y_ldbp_train']
+        ber_x_ldbp_test = ckpt['ber_x_ldbp_test']
+        ber_y_ldbp_test = ckpt['ber_y_ldbp_test']
+        ber_x_dbp_test_label = ckpt['ber_x_dbp_test_label']
+        ber_y_dbp_test_label = ckpt['ber_y_dbp_test_label']
+        rx_sym_ldbp_init_train = ckpt['rx_sym_ldbp_init_train']
+        rx_sym_ldbp_init_test = ckpt['rx_sym_ldbp_init_test']
+
+        beta2_est = ckpt['beta2_est']
+        beta2_std = ckpt['beta2_std']
+        beta2_acc_overall = ckpt['beta2_acc_overall']
+        beta2_acc_curr = ckpt.get('beta2_acc_curr')  # may be None
+        gamma_est = ckpt['gamma_est']
+        gamma_std = ckpt['gamma_std']
+        gamma_acc_overall = ckpt['gamma_acc_overall']
+        gamma_acc_curr = ckpt.get('gamma_acc_curr')  # may be None
+
+        print(f"  Final loss (train): {final_loss_train:.6e}")
+        print(f"  Final loss (test) : {final_loss_test:.6e}")
+
+        # Parameter estimation summary (from cache)
+        beta2_true = p['beta2']
+        beta2_dsp = p['beta2_DSP']
+        gamma_true = p['gamma']
+        gamma_dsp = p['gamma_DSP']
+
+        print(f"\n--- Parameter Estimation (from cache) ---")
+        print(f"  Beta2: eta2={p['eta2']*100:+.1f}%, "
+              f"DSP={beta2_dsp:.4e}, true={beta2_true:.4e}, "
+              f"est={beta2_est:.4e}+/-{beta2_std:.4e}, "
+              f"acc_overall={beta2_acc_overall:+.2f}%")
+        print(f"  Gamma: eta4={p['eta4']*100:+.1f}%, "
+              f"DSP={gamma_dsp:.4e}, true={gamma_true:.4e}, "
+              f"est={gamma_est:.4e}+/-{gamma_std:.4e}, "
+              f"acc_overall={gamma_acc_overall:+.2f}%")
 
 if not pretrained:
 
@@ -224,7 +256,19 @@ if not pretrained:
           f"({loss_history[0]/loss_history[-1]:.1f}x reduction)")
 
     # =====================================================================
-    # 8. Evaluate LDBP after training
+    # 8. Parameter Estimation (PRDBP internal step)
+    # =====================================================================
+    print("\n--- Parameter Estimation ---")
+    model.eval()
+    (beta2_est, delta_beta2_est, beta2_std, beta2_acc_overall,
+     beta2_acc_curr) = estimate_beta2(model, Nsub, fs_sub, fch, p, cfg,
+                                       layer_indices=cfg['h_plot_layers'],
+                                       downsample=cfg['h_plot_ds'])
+    (gamma_est, delta_gamma_est, gamma_std, gamma_acc_overall,
+     gamma_acc_curr) = estimate_gamma(model, p, layer_indices=cfg['h_plot_layers'])
+
+    # =====================================================================
+    # 9. Evaluate LDBP after training
     # =====================================================================
     print("\n--- LDBP After Training ---")
     model.eval()
@@ -254,7 +298,7 @@ if not pretrained:
         rx_wav_dbp_test_label, tx_data_test, p, m_center, sps_sub, p['rrc_taps_rx'])
 
     # =====================================================================
-    # 9. Save model checkpoint
+    # 10. Save model checkpoint
     # =====================================================================
     print("\nSaving model checkpoint...")
     save_model_cache(model_path, model, cfg, p,
@@ -273,14 +317,15 @@ if not pretrained:
         ber_y_dbp_test_label=ber_y_dbp_test_label,
         rx_sym_ldbp_init_train=rx_sym_ldbp_init_train,
         rx_sym_ldbp_init_test=rx_sym_ldbp_init_test,
+        beta2_est=beta2_est,
+        beta2_std=beta2_std,
+        beta2_acc_overall=beta2_acc_overall,
+        beta2_acc_curr=beta2_acc_curr,
+        gamma_est=gamma_est,
+        gamma_std=gamma_std,
+        gamma_acc_overall=gamma_acc_overall,
+        gamma_acc_curr=gamma_acc_curr,
     )
-
-# =====================================================================
-# 10. Beta2 estimation
-# =====================================================================
-estimate_beta2(model, Nsub, fs_sub, fch, p, cfg,
-               layer_indices=cfg['h_plot_layers'],
-               downsample=cfg['h_plot_ds'])
 
 # =====================================================================
 # 11. BER summary

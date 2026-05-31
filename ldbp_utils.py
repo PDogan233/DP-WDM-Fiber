@@ -113,6 +113,7 @@ def _compute_h_one_step(Nsub, fs_sub, fch, L_span, alpha_dBpm,
                         beta2, beta3, steps_per_span):
     """
     Compute the frequency-domain filter H for a single DBP step.
+    Often used to generate H_ref.
 
     H(omega) = exp((-alpha/2) * h - j * beta(omega) * h)
     where beta(omega) = 0.5*beta2*omega^2 + (1/6)*beta3*omega^3
@@ -155,6 +156,25 @@ def _extract_learned_h(model, layer_indices):
                 H = torch.complex(layer.H_real, layer.H_imag)
                 H_np = H.detach().cpu().numpy().flatten()
                 result.append((idx, H_np))
+    return result
+
+
+def _extract_learned_gamma(model, layer_indices=None):
+    """
+    Extract learned gamma from specified nonlinear layers.
+
+    layer_indices: list of 1-based indices, e.g. [1, 2, 5].
+                   If None, extract all nonlinear layers.
+
+    Returns list of (layer_idx, gamma_value) tuples.
+    """
+    result = []
+    idx = 0
+    for layer in model.layers:
+        if hasattr(layer, 'gamma'):
+            idx += 1
+            if layer_indices is None or idx in layer_indices:
+                result.append((idx, layer.gamma.item()))
     return result
 
 
@@ -413,7 +433,7 @@ def estimate_beta2(model, Nsub, fs_sub, fch, p, cfg,
                            layer_indices, downsample)
     if prep is None:
         print("  estimate_beta2: no linear layers found, skipping.")
-        return None, None
+        return None, None, None, None, None
 
     omega = prep['omega']; f_ghz = prep['f_ghz']
     h_dbp = prep['h_dbp']; H_init_ds = prep['H_init_ds']
@@ -422,7 +442,7 @@ def estimate_beta2(model, Nsub, fs_sub, fch, p, cfg,
     mask = (np.abs(f_ghz) >= fit_fmin_ghz) & (np.abs(f_ghz) <= fit_fmax_ghz)
     if mask.sum() < 5:
         print("  estimate_beta2: too few points in fit window, skipping.")
-        return None, None
+        return None, None, None, None, None
     wt = np.abs(H_init_ds[mask]) ** 2
 
     # M2: phi_learned quadratic fit
@@ -442,14 +462,16 @@ def estimate_beta2(model, Nsub, fs_sub, fch, p, cfg,
     # Accuracy: overall (vs initial DSP) and current (vs previous estimate)
     err_init = abs(beta2_dsp - beta2_true)
     err_now = abs(beta2_est - beta2_true)
-    acc_overall = (1.0 - err_now / err_init) * 100 if err_init > 0 else 0.0
+    beta2_acc_overall = (1.0 - err_now / err_init) * 100 if err_init > 0 else 0.0
 
+    beta2_acc_curr = None
     if prev_beta2 is not None:
         err_prev = abs(prev_beta2 - beta2_true)
-        acc_curr = (1.0 - err_now / err_prev) * 100 if err_prev > 0 else 0.0
-        acc_str = "acc_overall={:+.2f}%  acc_curr={:+.2f}%".format(acc_overall, acc_curr)
+        beta2_acc_curr = (1.0 - err_now / err_prev) * 100 if err_prev > 0 else 0.0
+        acc_str = "beta2_acc_overall={:+.2f}%  beta2_acc_curr={:+.2f}%".format(
+            beta2_acc_overall, beta2_acc_curr)
     else:
-        acc_str = "acc_overall={:+.2f}%  (first est.)".format(acc_overall)
+        acc_str = "beta2_acc_overall={:+.2f}%  (first est.)".format(beta2_acc_overall)
 
     print()
     print("=" * 68)
@@ -468,7 +490,72 @@ def estimate_beta2(model, Nsub, fs_sub, fch, p, cfg,
     print("=" * 68)
     print()
 
-    return beta2_est, delta_est
+    return beta2_est, delta_est, beta2_std, beta2_acc_overall, beta2_acc_curr
+
+
+def estimate_gamma(model, p, layer_indices=None, prev_gamma=None):
+    """
+    Estimate gamma by directly reading learned NonlinearLayer gamma parameters.
+
+    Computes layer-wise statistics and compares with gamma_DSP (init) and
+    gamma_true (physical).
+
+    prev_gamma: the gamma estimate from the PREVIOUS outer loop.
+        Used to compute gamma_acc_curr (step-wise accuracy improvement).
+        On the first call, pass None (or omit).
+
+    Returns (gamma_est, delta_gamma_est).
+    """
+    if layer_indices is None:
+        layer_indices = [1]
+
+    items = _extract_learned_gamma(model, layer_indices)
+    if not items:
+        print("  estimate_gamma: no nonlinear layers found, skipping.")
+        return None, None, None, None, None
+
+    gamma_vals = [v for _, v in items]
+    gamma_arr = np.array(gamma_vals)
+    gamma_est = np.mean(gamma_arr)
+    gamma_std = np.std(gamma_arr)
+
+    gamma_true = p['gamma']
+    gamma_dsp = p['gamma_DSP']
+    delta_true = gamma_true - gamma_dsp
+    delta_est = gamma_est - gamma_dsp
+
+    # Accuracy: overall (vs initial DSP) and current (vs previous estimate)
+    err_init = abs(gamma_dsp - gamma_true)
+    err_now = abs(gamma_est - gamma_true)
+    gamma_acc_overall = (1.0 - err_now / err_init) * 100 if err_init > 0 else 0.0
+
+    gamma_acc_curr = None
+    if prev_gamma is not None:
+        err_prev = abs(prev_gamma - gamma_true)
+        gamma_acc_curr = (1.0 - err_now / err_prev) * 100 if err_prev > 0 else 0.0
+        acc_str = "gamma_acc_overall={:+.2f}%  gamma_acc_curr={:+.2f}%".format(
+            gamma_acc_overall, gamma_acc_curr)
+    else:
+        acc_str = "gamma_acc_overall={:+.2f}%  (first est.)".format(gamma_acc_overall)
+
+    n_layers = len(gamma_arr)
+    print()
+    print("=" * 68)
+    print("  Gamma Estimation  ({} nonlinear layers)".format(n_layers))
+    print("-" * 68)
+    print("  eta4               = {:+.1f} %".format(p['eta4'] * 100))
+    print("  gamma (DSP init)   = {:.4e}  1/(W*m)".format(gamma_dsp))
+    print("  gamma (true)       = {:.4e}  1/(W*m)".format(gamma_true))
+    print("  Delta_gamma (true) = {:.4e}  1/(W*m)".format(delta_true))
+    print("-" * 68)
+    print("  gamma (estimated)  = {:.4e} +/- {:.4e}  1/(W*m)".format(
+        gamma_est, gamma_std))
+    print("  Delta_gamma (est)  = {:.4e}  1/(W*m)".format(delta_est))
+    print("  {}".format(acc_str))
+    print("=" * 68)
+    print()
+
+    return gamma_est, delta_est, gamma_std, gamma_acc_overall, gamma_acc_curr
 
 
 def estimate_beta2_m1(prep, p, fit_fmin_ghz, fit_fmax_ghz):

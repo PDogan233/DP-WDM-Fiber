@@ -6,6 +6,9 @@ import torch
 
 from data_cache import build_cache_path, _param_snapshot
 
+# Increment this when checkpoint format changes (new required keys, etc.)
+CURRENT_CKPT_VERSION = 1
+
 
 def build_model_dir(p, seed_train, seed_test):
     """Build model directory path, reusing the same naming as data cache."""
@@ -50,6 +53,7 @@ def save_model_cache(path, model, cfg, p, **results):
         'model_state_dict': model.state_dict(),
         'cfg': cfg,
         'p_snapshot': snap,
+        'ckpt_version': CURRENT_CKPT_VERSION,
         **results,
     }
     torch.save(checkpoint, path)
