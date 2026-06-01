@@ -7,7 +7,7 @@ import torch
 from data_cache import build_cache_path, _param_snapshot
 
 # Increment when checkpoint format changes (new required keys, etc.)
-CURRENT_CKPT_VERSION = 2
+CURRENT_CKPT_VERSION = 4
 
 
 def build_model_dir(p, seed_train, seed_test):
@@ -45,6 +45,33 @@ def build_model_filename(cfg, p):
     return f'{name}.pth'
 
 
+def build_model_filename_prdbp(cfg, p):
+    """Build model filename for PRDBP (includes N_est)."""
+    def _pct_str(val):
+        pct = round(val * 100 + 1e-12, 6)
+        s = f"{pct:.6f}".rstrip('0').rstrip('.')
+        return f"+{s}" if pct >= 0 else s
+
+    e2 = _pct_str(p['eta2'])
+    e3 = _pct_str(p['eta3'])
+    e4 = _pct_str(p['eta4'])
+
+    lr_str = f"{cfg['learning_rate']:.0e}".replace('-', 'm')
+    lrmin_str = f"{cfg['learning_rate_min']:.0e}".replace('-', 'm')
+    g_flag = 'GT' if cfg['trainable_gamma'] else 'GF'
+    b2_flag = 'B2T' if cfg['trainable_beta2'] else 'B2F'
+    name = (
+        f"stps{cfg['steps_per_span']}_"
+        f"lr{lr_str}_"
+        f"lrmin{lrmin_str}_"
+        f"Nest{cfg['N_est']}_"
+        f"ep{cfg['N_ep_per_est']}_"
+        f"e2{e2}_e3{e3}_e4{e4}_"
+        f"{g_flag}_{b2_flag}"
+    )
+    return f'{name}.pth'
+
+
 def save_model_cache(path, model, cfg, p, **results):
     """Save model state + config + results to checkpoint file."""
     snap = _param_snapshot(p)
@@ -72,7 +99,8 @@ def load_model_cache(path, cfg, p):
 
     # Validate cfg
     for k in ['steps_per_span', 'trainable_gamma', 'trainable_beta2',
-              'num_epochs', 'learning_rate', 'learning_rate_min']:
+              'num_epochs', 'N_ep_per_est', 'N_est',
+              'learning_rate', 'learning_rate_min']:
         if checkpoint['cfg'].get(k) != cfg.get(k):
             raise ValueError(
                 f"cfg mismatch: {k} current={cfg.get(k)}  cached={checkpoint['cfg'].get(k)}\n"

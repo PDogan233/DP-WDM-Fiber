@@ -100,6 +100,13 @@ class LDBP(nn.Module):
         self.steps_per_span = steps_per_span
         self.sqrtG_val = float(np.sqrt(G_lin))
 
+        # Stored for potential reinitialization (PRDBP)
+        self.Nsub = Nsub
+        self.fs_sub = fs_sub
+        self.fch = fch
+        self.L_span = L_span
+        self.alpha_dBpm = alpha_dBpm
+
         # Build alternating Linear -> Nonlinear layers
         layers = []
         for _ in range(Nspans):
@@ -134,3 +141,38 @@ class LDBP(nn.Module):
                 H = torch.complex(layer.H_real, layer.H_imag)
                 norms.append(torch.mean(torch.abs(H)).item())
         return norms
+
+    def reinitialize_linear_layers(self, beta2, beta3):
+        """Recompute H_real, H_imag for all LinearLayers from physical formula.
+
+        Uses the stored geometry parameters and new beta2/beta3.
+        Updates Parameter data in-place, preserving requires_grad.
+        """
+        df_sub = self.fs_sub / self.Nsub
+        f_sub = np.arange(-self.Nsub / 2, self.Nsub / 2).reshape(-1, 1) * df_sub
+        omega_total_sub = 2 * np.pi * (f_sub + self.fch)
+
+        alpha_np = np.log(10 ** (self.alpha_dBpm / 10))
+        beta_omega_sub = (0.5 * beta2 * omega_total_sub ** 2 +
+                          (1.0 / 6.0) * beta3 * omega_total_sub ** 3)
+
+        h_step = self.L_span / self.steps_per_span
+        h_dbp = -h_step
+
+        H_one_step = np.exp((-alpha_np / 2) * h_dbp - 1j * (beta_omega_sub * h_dbp))
+        H_real_np = H_one_step.real.astype(np.float32)
+        H_imag_np = H_one_step.imag.astype(np.float32)
+
+        for layer in self.layers:
+            if isinstance(layer, LDBP_LinearLayer):
+                layer.H_real.data.copy_(torch.from_numpy(H_real_np.copy()))
+                layer.H_imag.data.copy_(torch.from_numpy(H_imag_np.copy()))
+
+    def reinitialize_nonlinear_layers(self, gamma):
+        """Update gamma for all NonlinearLayers to the given value.
+
+        Updates Parameter data in-place, preserving requires_grad.
+        """
+        for layer in self.layers:
+            if isinstance(layer, LDBP_NonlinearLayer):
+                layer.gamma.data.fill_(gamma)
