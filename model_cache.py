@@ -6,8 +6,8 @@ import torch
 
 from data_cache import build_cache_path, _param_snapshot
 
-# Increment this when checkpoint format changes (new required keys, etc.)
-CURRENT_CKPT_VERSION = 1
+# Increment when checkpoint format changes (new required keys, etc.)
+CURRENT_CKPT_VERSION = 2
 
 
 def build_model_dir(p, seed_train, seed_test):
@@ -32,13 +32,15 @@ def build_model_filename(cfg, p):
 
     lr_str = f"{cfg['learning_rate']:.0e}".replace('-', 'm')
     lrmin_str = f"{cfg['learning_rate_min']:.0e}".replace('-', 'm')
+    g_flag = 'GT' if cfg['trainable_gamma'] else 'GF'
+    b2_flag = 'B2T' if cfg['trainable_beta2'] else 'B2F'
     name = (
         f"stps{cfg['steps_per_span']}_"
-        f"{'trainable' if cfg['trainable_gamma'] else 'fixedgamma'}_"
         f"lr{lr_str}_"
         f"lrmin{lrmin_str}_"
         f"ep{cfg['num_epochs']}_"
-        f"e2{e2}_e3{e3}_e4{e4}"
+        f"e2{e2}_e3{e3}_e4{e4}_"
+        f"{g_flag}_{b2_flag}"
     )
     return f'{name}.pth'
 
@@ -69,8 +71,8 @@ def load_model_cache(path, cfg, p):
     checkpoint = torch.load(path, map_location='cpu', weights_only=False)
 
     # Validate cfg
-    for k in ['steps_per_span', 'trainable_gamma', 'num_epochs',
-              'learning_rate', 'learning_rate_min']:
+    for k in ['steps_per_span', 'trainable_gamma', 'trainable_beta2',
+              'num_epochs', 'learning_rate', 'learning_rate_min']:
         if checkpoint['cfg'].get(k) != cfg.get(k):
             raise ValueError(
                 f"cfg mismatch: {k} current={cfg.get(k)}  cached={checkpoint['cfg'].get(k)}\n"

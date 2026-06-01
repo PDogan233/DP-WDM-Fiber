@@ -419,7 +419,7 @@ def estimate_beta2(model, Nsub, fs_sub, fch, p, cfg,
         Used to compute acc_curr (step-wise accuracy improvement).
         On the first call, pass None (or omit).
 
-    Returns (beta2_est, delta_beta2_est).
+    Returns (beta2_est, delta_est, beta2_std, beta2_acc_overall, beta2_acc_curr).
     """
     Rs = p['Rs']
     if fit_fmin_ghz is None:
@@ -504,7 +504,7 @@ def estimate_gamma(model, p, layer_indices=None, prev_gamma=None):
         Used to compute gamma_acc_curr (step-wise accuracy improvement).
         On the first call, pass None (or omit).
 
-    Returns (gamma_est, delta_gamma_est).
+    Returns (gamma_est, delta_est, gamma_std, gamma_acc_overall, gamma_acc_curr).
     """
     if layer_indices is None:
         layer_indices = [1]

@@ -10,10 +10,14 @@ class LDBP_LinearLayer(nn.Module):
     a directly learned complex frequency-domain filter.
     """
 
-    def __init__(self, Nsub, H_real_init, H_imag_init):
+    def __init__(self, Nsub, H_real_init, H_imag_init, trainable_beta2=True):
         super().__init__()
-        self.H_real = nn.Parameter(torch.tensor(H_real_init, dtype=torch.float32))
-        self.H_imag = nn.Parameter(torch.tensor(H_imag_init, dtype=torch.float32))
+        self.H_real = nn.Parameter(
+            torch.tensor(H_real_init, dtype=torch.float32),
+            requires_grad=trainable_beta2)
+        self.H_imag = nn.Parameter(
+            torch.tensor(H_imag_init, dtype=torch.float32),
+            requires_grad=trainable_beta2)
 
     def forward(self, x):
         """
@@ -40,11 +44,9 @@ class LDBP_NonlinearLayer(nn.Module):
     def __init__(self, gamma_init, h_step, trainable_gamma=True):
         super().__init__()
         self.h_step = h_step  # negative for DBP
-        gamma_tensor = torch.tensor([gamma_init], dtype=torch.float32)
-        if trainable_gamma:
-            self.gamma = nn.Parameter(gamma_tensor)
-        else:
-            self.register_buffer('gamma', gamma_tensor)
+        self.gamma = nn.Parameter(
+            torch.tensor([gamma_init], dtype=torch.float32),
+            requires_grad=trainable_gamma)
 
     def forward(self, x):
         """
@@ -73,7 +75,8 @@ class LDBP(nn.Module):
     """
 
     def __init__(self, Nsub, fs_sub, fch, L_span, alpha_dBpm, beta2, beta3, gamma,
-                 Nspans, steps_per_span, G_lin, trainable_gamma=True):
+                 Nspans, steps_per_span, G_lin, trainable_gamma=True,
+                 trainable_beta2=True):
         super().__init__()
 
         # Build frequency grid for H initialization
@@ -101,7 +104,8 @@ class LDBP(nn.Module):
         layers = []
         for _ in range(Nspans):
             for _ in range(steps_per_span):
-                layers.append(LDBP_LinearLayer(Nsub, H_real_np.copy(), H_imag_np.copy()))
+                layers.append(LDBP_LinearLayer(Nsub, H_real_np.copy(), H_imag_np.copy(),
+                                                trainable_beta2))
                 layers.append(LDBP_NonlinearLayer(gamma, h_dbp, trainable_gamma))
 
         self.layers = nn.ModuleList(layers)

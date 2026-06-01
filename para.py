@@ -107,7 +107,7 @@ def get_parameters():
     p['eta1'] = 0.0 * 1e-2
     p['eta2'] = 4 * 1e-2
     p['eta3'] = 0.0 * 1e-2
-    p['eta4'] = 1.0 * 1e-2
+    p['eta4'] = 0.0 * 1e-2
     p['beta1_DSP'] = (1 + p['eta1']) * p['beta1']
     p['beta2_DSP'] = (1 + p['eta2']) * p['beta2']
     p['beta3_DSP'] = (1 + p['eta3']) * p['beta3']

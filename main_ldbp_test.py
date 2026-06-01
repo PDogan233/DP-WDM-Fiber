@@ -25,15 +25,19 @@ from model_cache import (build_model_dir, build_model_filename,
 
 cfg = {
     'steps_per_span': 10,
-    'trainable_gamma': True,
+
     'num_epochs': 500,  # 6000
     'learning_rate': 1e-3,
     'learning_rate_min': 1e-4,
-    'print_interval': 100,
+
+    'trainable_gamma': True,
+    'trainable_beta2': True,
     'use_cache': True,
+    
     # List of LDBP layer indices to plot H filter and estimate beta2 
     # e.g., list(range(1, 41)), list(range(1, 101, 10))
-    'h_plot_layers': [1,10,20,30,40,50],  
+    'h_plot_layers': [1,10,20,30,40,50], 
+    'print_interval': 100,
     'h_plot_ds': 500,
 }
 
@@ -132,14 +136,16 @@ print(f"  rx_wav_sub_train_ts: {rx_wav_sub_train_ts.shape}, {rx_wav_sub_train_ts
 # =====================================================================
 print(f"\nBuilding LDBP: Nspans={p['Nspans']}, "
       f"steps_per_span={cfg['steps_per_span']}, "
-      f"trainable_gamma={cfg['trainable_gamma']}")
+      f"trainable_gamma={cfg['trainable_gamma']}, "
+      f"trainable_beta2={cfg['trainable_beta2']}")
 
 # LDBP is initialized with MISMATCHED DSP params (the "wrong" starting point).
 # It must learn to converge toward the correct (physical) DBP label.
 model = LDBP(
     Nsub=Nsub, fs_sub=fs_sub, fch=fch, L_span=p['L_span'], alpha_dBpm=p['alpha_dBpm'],
     beta2=p['beta2_DSP'], beta3=p['beta3_DSP'], gamma=p['gamma_DSP'], Nspans=p['Nspans'], 
-    steps_per_span=cfg['steps_per_span'], G_lin=p['G_lin'], trainable_gamma=cfg['trainable_gamma']
+    steps_per_span=cfg['steps_per_span'], G_lin=p['G_lin'],
+    trainable_gamma=cfg['trainable_gamma'], trainable_beta2=cfg['trainable_beta2']
 ).to(DEVICE)
 
 total_params = sum(pn.numel() for pn in model.parameters())
@@ -156,13 +162,13 @@ model_path = os.path.join(model_dir, model_filename)
 pretrained = False
 if cfg.get('use_cache') and os.path.exists(model_path):
     print(f"\nLoading cached model from {model_path}...")
-    ckpt = load_model_cache(model_path, cfg, p)
+    try:
+        ckpt = load_model_cache(model_path, cfg, p)
+        if ckpt.get('ckpt_version') != CURRENT_CKPT_VERSION:
+            raise ValueError(f"version mismatch "
+                             f"(got {ckpt.get('ckpt_version')}, "
+                             f"need {CURRENT_CKPT_VERSION})")
 
-    if ckpt.get('ckpt_version') != CURRENT_CKPT_VERSION:
-        print(f"  Checkpoint version mismatch "
-              f"(got {ckpt.get('ckpt_version')}, need {CURRENT_CKPT_VERSION}).")
-        print("  Will re-train and overwrite.")
-    else:
         model.load_state_dict(ckpt['model_state_dict'])
         model.eval()
         pretrained = True
@@ -186,16 +192,15 @@ if cfg.get('use_cache') and os.path.exists(model_path):
         beta2_est = ckpt['beta2_est']
         beta2_std = ckpt['beta2_std']
         beta2_acc_overall = ckpt['beta2_acc_overall']
-        beta2_acc_curr = ckpt.get('beta2_acc_curr')  # may be None
+        beta2_acc_curr = ckpt.get('beta2_acc_curr')
         gamma_est = ckpt['gamma_est']
         gamma_std = ckpt['gamma_std']
         gamma_acc_overall = ckpt['gamma_acc_overall']
-        gamma_acc_curr = ckpt.get('gamma_acc_curr')  # may be None
+        gamma_acc_curr = ckpt.get('gamma_acc_curr')
 
         print(f"  Final loss (train): {final_loss_train:.6e}")
         print(f"  Final loss (test) : {final_loss_test:.6e}")
 
-        # Parameter estimation summary (from cache)
         beta2_true = p['beta2']
         beta2_dsp = p['beta2_DSP']
         gamma_true = p['gamma']
@@ -210,6 +215,9 @@ if cfg.get('use_cache') and os.path.exists(model_path):
               f"DSP={gamma_dsp:.4e}, true={gamma_true:.4e}, "
               f"est={gamma_est:.4e}+/-{gamma_std:.4e}, "
               f"acc_overall={gamma_acc_overall:+.2f}%")
+
+    except (ValueError, KeyError) as e:
+        print(f"  Checkpoint incompatible ({e}), will re-train.")
 
 if not pretrained:
 
@@ -388,7 +396,7 @@ plt.semilogy(loss_history)
 plt.xlabel('Epoch')
 plt.ylabel('MSE Loss')
 plt.title(f"LDBP Training (steps_per_span={cfg['steps_per_span']}, "
-          f"trainable_gamma={cfg['trainable_gamma']})")
+          f"trainable_G={cfg['trainable_gamma']}, trainable_B2={cfg['trainable_beta2']})")
 plt.grid(True)
 plt.tight_layout()
 

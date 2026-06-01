@@ -61,10 +61,10 @@ Examples:
 | `rx_DSP.py` | Matched filtering, subband extraction (`subband_convert`), clock recovery (`decimator` — variance-based timing), frame sync, phase derotation, power normalization, 16-QAM demodulation. |
 | `utils.py` | `sync_align()` (cross-correlation alignment), `rcosdesign()` (RRC filter — equivalent to MATLAB's `rcosdesign`). |
 | `visualize.py` | Constellation diagrams, waveform plots, frequency spectra. |
-| `ldbp.py` | **Learned DBP** — PyTorch `nn.Module`. Alternating `LDBP_LinearLayer` (learnable frequency-domain filter `H`) and `LDBP_NonlinearLayer` (Manakov Kerr, optionally learnable `gamma`). Structure per step: Linear → Nonlinear (no symmetric SSF). EDFA gain removal between spans is fixed. |
-| `ldbp_utils.py` | Helpers for LDBP training: `complex_np_to_torch`, `extract_subband`, `rx_after_dbp`, `plot_constellation_grid`, `plot_ber_bars`, `plot_h_vs_ideal`, `plot_h_vs_init`, `estimate_beta2` (primary), `estimate_beta2_m1`, `estimate_beta2_m3` (reference). H visualization uses block-average downsampling and individual phase unwrapping. |
+| `ldbp.py` | **Learned DBP** — PyTorch `nn.Module`. Alternating `LDBP_LinearLayer` (learnable frequency-domain filter `H`, optionally trainable via `trainable_beta2`) and `LDBP_NonlinearLayer` (Manakov Kerr, optionally trainable `gamma`). Both use `nn.Parameter(..., requires_grad=...)` for flexible freeze/unfreeze. Structure per step: Linear → Nonlinear (no symmetric SSF). EDFA gain removal between spans is fixed. |
+| `ldbp_utils.py` | Helpers for LDBP training: `complex_np_to_torch`, `extract_subband`, `rx_after_dbp`, `plot_constellation_grid`, `plot_ber_bars`, `plot_h_vs_ideal`, `plot_h_vs_init`, `estimate_beta2` (M2, primary), `estimate_gamma` (direct extraction), `_extract_learned_h`, `_extract_learned_gamma`, `estimate_beta2_m1`, `estimate_beta2_m3` (reference). H visualization uses block-average downsampling and individual phase unwrapping. |
 | `data_cache.py` | Simulation data caching: `build_cache_path`, `save_sim_cache`, `load_sim_cache`. Saves SSFM results to `data/` to skip recomputation when parameters haven't changed. |
-| `model_cache.py` | Model checkpoint caching: `build_model_dir`, `build_model_filename`, `save_model_cache`, `load_model_cache`. Saves trained LDBP weights + results to `model/<system>/` for reuse. |
+| `model_cache.py` | Model checkpoint caching: `build_model_dir`, `build_model_filename`, `save_model_cache`, `load_model_cache`, `CURRENT_CKPT_VERSION`. Saves trained LDBP weights + estimation results to `model/<system>/` for reuse. Version number in checkpoint enables automatic detection of format changes — incompatible checkpoints trigger re-training. |
 | `main_ldbp_test.py` | LDBP training + evaluation script. Center channel only. Trains LDBP (initialized with mismatched DSP params) to match true DBP output (matched physical params). Uses `data_cache.py` to skip SSFM and `model_cache.py` to skip training when results already exist. |
 
 ### Data flow (main_simu_v4.py / main_simu_test.py)
@@ -84,7 +84,7 @@ Examples:
 
 ### Beta2 estimation from learned H filters
 
-Three methods were developed to extract the effective β₂ from trained LDBP linear layers. **M2 is the primary method** — it directly fits the learned phase φ_learned(ω) rather than the phase residual Δφ, which makes it ~500× more numerically stable.
+Three methods were developed to extract the effective β₂ from trained LDBP linear layers. **M2 is the primary method** — it directly fits the learned phase φ_learned(ω) rather than the phase residual Δφ, which makes it ~500× more numerically stable. For Non-trainable case, when `trainable_beta2=False`, estimation still runs and returns the (unchanged) DSP init value.
 
 #### M2 (primary) — Direct φ_learned quadratic fit
 
@@ -112,6 +112,17 @@ Uses explicit 3-point central finite differences. Correct order-of-magnitude but
 - Fitting φ_learned directly (~3.7 rad signal) gives 500× better SNR than fitting Δφ (~0.02 rad residual).
 - M2 estimates converge to ~99.99% accuracy in a single fit when training is sufficient, but the H filter remains non-physical. This motivates PRDBP: periodic re-initialization forces H back to quadratic form.
 
+### Gamma estimation from learned nonlinear layers
+
+Gamma is estimated by **directly reading** the learned `gamma` parameter from each `LDBP_NonlinearLayer`. Unlike beta2 (which requires fitting a frequency-domain phase curve), gamma is a scalar per layer — estimation reduces to layer-wise extraction and averaging.
+
+- **Method**: `_extract_learned_gamma(model, layer_indices)` → get per-layer gamma values → `mean`/`std` across layers
+- **Comparison**: `gamma_est` vs `gamma_DSP` (init) vs `gamma_true` (physical), with `delta_est = gamma_est − gamma_DSP`
+- **Accuracy**: `gamma_acc_overall = 1 − |err_now|/|err_init|` (vs DSP init), `gamma_acc_curr` (vs `prev_gamma`, for PRDBP step-wise tracking)
+- **Interface**: `estimate_gamma(model, p, layer_indices, prev_gamma)` returns `(gamma_est, delta_est, gamma_std, gamma_acc_overall, gamma_acc_curr)`
+- **Non-trainable case**: when `trainable_gamma=False`, estimation still runs and returns the (unchanged) DSP init value with `gamma_acc_overall=0%`
+- **Layer indices**: reuses `cfg['h_plot_layers']` — same 1-based index selects corresponding linear and nonlinear layers at each step
+
 ### PRDBP (Physics-Regulated DBP) — design concept
 
 PRDBP wraps LDBP training in a double loop to enforce physical constraints:
@@ -121,8 +132,8 @@ PRDBP wraps LDBP training in a double loop to enforce physical constraints:
 - **Key insight**: LDBP can achieve low waveform MSE without H converging to true β₂. PRDBP projects H back onto the manifold of physically-valid filters after each training phase, preventing non-physical overfitting.
 
 Missing infrastructure (in `ldbp.py`):
-- `LDBP.reinitialize_linear_layers(beta2)` — recompute H_real/H_imag for all LinearLayer instances
-- `LDBP.get_gamma_values()` — extract gamma from all NonlinearLayer instances
+- `LDBP.reinitialize_linear_layers(beta2, beta3, gamma)` — recompute H_real/H_imag for all LinearLayer instances from physical formula with estimated params; optionally also reinitialize NonlinearLayer gamma
+- `LDBP.reinitialize_nonlinear_layers(gamma)` — recompute gamma for all NonlinearLayer instances (or update existing Parameter's `.data`)
 
 ### Data flow (main_ldbp_test.py)
 1. `get_parameters()` → params dict `p`
@@ -130,14 +141,18 @@ Missing infrastructure (in `ldbp.py`):
 3. If cache hit: `load_sim_cache()` with param validation → skip to step 5
 4. If cache miss: generate train/test datasets (seed=42/99), extract subband, compute True DBP labels, then `save_sim_cache()`
 5. `complex_np_to_torch()` → GPU tensors
-6. Build LDBP model (initialized with **mismatched** DSP params `beta2_DSP`, `gamma_DSP`)
+6. Build LDBP model (initialized with **mismatched** DSP params `beta2_DSP`, `gamma_DSP`; `trainable_beta2` and `trainable_gamma` from cfg)
 7. `build_model_dir()` + `build_model_filename()` → check `model/<system>/` for trained checkpoint
-8. If model cache hit: `load_model_cache()` → restore weights, skip to step 10
-9. If model cache miss: training loop (Adam + CosineAnnealingLR, configurable epochs) → evaluation → `save_model_cache()`
-10. `estimate_beta2()` — extract β₂ from learned H via M2 quadratic fit, print comparison table
-11. BER summary
-12. Constellation data (re-run if pretrained)
-13. Plots: waveform/spectrum, constellation grid, loss curve, BER bars, H filter analysis (learned vs ideal, learned vs initial)
+8. If model cache compatible (cfg/p match + version match): `load_model_cache()` → restore weights + estimation results, print summary, skip to BER summary
+9. If model cache incompatible (any mismatch → ValueError/KeyError): **re-train from scratch:**
+   - 6. Evaluate LDBP at initialization
+   - 7. Training loop (Adam + CosineAnnealingLR)
+   - **8. Parameter Estimation** (`estimate_beta2()` + `estimate_gamma()`) — positioned here as PRDBP internal step
+   - 9. Evaluate LDBP after training (loss + BER)
+   - 10. `save_model_cache()` with estimation results (`beta2_est`, `gamma_est`, acc values, etc.)
+10. BER summary
+11. Constellation data (re-run evaluation if pretrained)
+12. Plots: constellation grid, loss curve, BER bars, H filter analysis (learned vs ideal, learned vs initial)
 
 ### LDBP vs analytical DBP design differences
 
@@ -145,8 +160,8 @@ Missing infrastructure (in `ldbp.py`):
 |---|---|---|
 | Step structure | Symmetric SSF: NL/2 → Linear → NL/2 | Asymmetric: Linear → Nonlinear |
 | Steps per span | ~50 (dz=2km) | Configurable, typ. 1-5 |
-| Linear operator | `H = exp((-α/2)h - j·β(ω)·h)` | Learnable `H_real`, `H_imag` parameters |
-| Nonlinear operator | Fixed `(8/9)*gamma` | Optionally learnable `gamma` |
+| Linear operator | `H = exp((-α/2)h - j·β(ω)·h)` | Learnable `H_real`, `H_imag` parameters (optionally frozen via `trainable_beta2=False`) |
+| Nonlinear operator | Fixed `(8/9)*gamma` | Optionally learnable `gamma` (via `trainable_gamma`) |
 | EDFA removal | `x / sqrt(G_lin)` | Same, fixed |
 | Framework | NumPy | PyTorch (GPU, autograd) |
 
@@ -156,16 +171,22 @@ Missing infrastructure (in `ldbp.py`):
 - **LDBP is initialized from physical formula** (with mismatch if DSP params differ), then fine-tuned via gradient descent to compensate for both the mismatch and the coarse step approximation.
 - **LDBP training target** is the true DBP output (matched physical params, fine steps), not the TX symbols, avoiding the need for differentiable clock recovery and demodulation.
 - **Simulation data caching** (`data_cache.py`): SSFM results saved to `data/` with human-readable filenames encoding key physical params (Nsym, Nch, Nspans, L_span, PinW_ch, etc.). Internal param snapshots validate that loaded data matches current `para.py`. Eta (DSP mismatch) params are excluded from the data snapshot since they don't affect SSFM.
-- **Model checkpoint caching** (`model_cache.py`): trained LDBP weights + BER results saved to `model/<system>/`. The system folder name reuses the data cache naming convention. Model filenames encode cfg params (steps_per_span, learning_rate, num_epochs) AND DSP mismatch (e.g. `e2+1.5` = eta2=1.5%). Both cfg and p_snapshot are validated on load.
+- **Model checkpoint caching** (`model_cache.py`): trained LDBP weights + estimation results + BER results saved to `model/<system>/`. The system folder name reuses the data cache naming convention. Model filenames encode cfg params. Filename format: `stps{steps}_lr{lr}_lrmin{lrmin}_ep{epochs}_e2{eta2}_e3{eta3}_e4{eta4}_{GT|GF}_{B2T|B2F}.pth`. Trainability flags: `GT`/`GF` for gamma, `B2T`/`B2F` for beta2. `CURRENT_CKPT_VERSION` (currently 2) is stored in each checkpoint — version mismatch triggers re-training. cfg and p_snapshot are validated on load; any mismatch raises ValueError caught by main script's try/except.
 - **H filter visualization**: block-average downsampling (not strided decimation) prevents aliasing of phase wrapping artifacts. Phase residual uses individually unwrapped curves subtracted (`unwrap(angle(learned)) - unwrap(angle(ref))`), which is more robust than computing the angle of the complex product. All H plot rows now include x-axis labels ("Frequency (GHz)").
 - **Beta2 estimation from learned H**: M2 (direct φ_learned quadratic fit) is the primary method. Fitting φ_learned (~3.7 rad signal) rather than Δφ (~0.02 rad residual) gives ~500× better SNR. Trusted frequency window defaults to `[Rs/20, Rs/3]` — these are anchored to the symbol rate Rs (not hardcoded GHz) so they auto-adapt to different system configurations. |H_init|² weighting provides inverse-variance optimal weights since phase noise ∝ 1/|H|.
 - **Phase residual is non-quadratic after training**: the network learns frequency-domain ripple that compensates β₂ mismatch at the waveform level without converging to the true β₂ in H's phase. This is the core motivation for PRDBP's physics-regulation outer loop.
-- **`estimate_beta2()` interface**: takes `prev_beta2` parameter for step-wise accuracy tracking; returns `(beta2_est, delta_est)`. Accuracy metrics: `acc_overall` = 1 − |err_now|/|err_init| (vs DSP init), `acc_curr` = 1 − |err_now|/|err_prev| (vs previous estimate). M1 and M3 are kept as standalone functions for future comparison.
+- **`estimate_beta2()` interface**: takes `prev_beta2` parameter for step-wise accuracy tracking; returns `(beta2_est, delta_est, beta2_std, beta2_acc_overall, beta2_acc_curr)`. Accuracy metrics: `beta2_acc_overall` = 1 − |err_now|/|err_init| (vs DSP init), `beta2_acc_curr` = 1 − |err_now|/|err_prev| (vs previous estimate, None on first call). M1 and M3 are kept as standalone functions for future comparison.
+- **`estimate_gamma()` interface**: mirrors `estimate_beta2()` — returns `(gamma_est, delta_est, gamma_std, gamma_acc_overall, gamma_acc_curr)`. Takes `prev_gamma` for step-wise tracking.
+- **Trainability control**: both `LDBP_LinearLayer` and `LDBP_NonlinearLayer` use `nn.Parameter(..., requires_grad=trainable)` (not `register_buffer`). `requires_grad` allows future dynamic freeze/unfreeze during training (e.g., alternating beta2/gamma optimization in PRDBP), while `register_buffer` would permanently exclude the tensor from the optimizer.
+- **Checkpoint compatibility**: a single `try/except (ValueError, KeyError)` block handles all incompatibility cases — cfg mismatch, p mismatch, version mismatch, missing keys. Any failure → delete old file implicitly by overwriting after re-training.
 
 ## Notes
 - PMD is implemented but disabled by default (`pmd_coeff = 0` in `para.py`).
 - `beta3` is set to 0 in `para.py` for simplified testing.
-- DSP mismatch params (eta1-eta4) control the initialization error for LDBP robustness testing. They are stored in `p` for access by `model_cache.py`.
+- DSP mismatch params (eta1-eta4) control the initialization error for LDBP robustness testing. They are stored in `p` for access by `model_cache.py`. eta2 controls beta2 mismatch, eta4 controls gamma mismatch.
 - The `decimator` and `sync_align` functions use non-differentiable operations (argmax, spline interpolation) and are only used for evaluation, not during LDBP training.
-- `h_plot_layers` and `h_plot_ds` in `cfg` control which linear layers appear in H filter plots and the block-average downsampling factor. Also controls which layers participate in `estimate_beta2()` layer averaging (e.g. `list(range(1, 41))` for all layers 1-40).
+- `h_plot_layers` and `h_plot_ds` in `cfg` control which layers appear in H filter plots and the block-average downsampling factor. Also controls which layers participate in `estimate_beta2()` and `estimate_gamma()` layer averaging (same 1-based index for paired linear/nonlinear layers).
 - `estimate_beta2()` frequency limits default to `fit_fmin_ghz=Rs/20`, `fit_fmax_ghz=Rs/3`. These can be overridden via keyword arguments. `estimate_beta2_m1()` and `estimate_beta2_m3()` are available as reference methods but not called by default.
+- `CURRENT_CKPT_VERSION` in `model_cache.py` must be incremented whenever the checkpoint format changes (new required keys, new result fields). Bumping the version ensures old checkpoints trigger automatic re-training rather than crashing.
+- `trainable_beta2` and `trainable_gamma` in `cfg` allow independent control of which physical parameters are learned. Set both to False for a frozen physics-only DBP; set one True/one False to isolate parameter estimation testing.
+- Parameter estimation results (`beta2_est`, `gamma_est`, acc values, etc.) are saved to checkpoint so pretrained loading can print summaries without re-running estimation functions.
