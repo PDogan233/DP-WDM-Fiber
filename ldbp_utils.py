@@ -423,9 +423,9 @@ def estimate_beta2(model, Nsub, fs_sub, fch, p, cfg,
     """
     Rs = p['Rs']
     if fit_fmin_ghz is None:
-        fit_fmin_ghz = Rs / 20 / 1e9
+        fit_fmin_ghz = Rs / 20 / 1e9    # Rs / 20 / 1e9
     if fit_fmax_ghz is None:
-        fit_fmax_ghz = Rs / 3 / 1e9
+        fit_fmax_ghz = Rs / 3 / 1e9     # Rs / 3 / 1e9
     if layer_indices is None:
         layer_indices = [1]
 

@@ -71,7 +71,7 @@ def get_parameters():
     
     # Fiber parameters
     p['L_span'] = 100e3           # Fiber length per span [m]
-    p['Nspans'] = 8              # Number of spans
+    p['Nspans'] = 10              # Number of spans
     p['alpha_dBpm'] = 0.2e-3      # Loss [dB/m]
    
     GroupRef = 1.47               # group refractive index
@@ -105,7 +105,7 @@ def get_parameters():
     
     # DSP Mismatch parameters (for testing robustness)
     p['eta1'] = 0.0 * 1e-2
-    p['eta2'] = 8 * 1e-2
+    p['eta2'] = -8 * 1e-2
     p['eta3'] = 0.0 * 1e-2
     p['eta4'] = 0.0 * 1e-2
     p['beta1_DSP'] = (1 + p['eta1']) * p['beta1']

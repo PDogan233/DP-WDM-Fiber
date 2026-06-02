@@ -26,8 +26,8 @@ from model_cache import (build_model_dir, build_model_filename_prdbp,
 cfg = {
     'steps_per_span': 10,
 
-    'N_est': 7,                 # outer loop iterations
-    'N_ep_per_est': 100,        # epochs per inner loop
+    'N_est': 1,                 # outer loop iterations
+    'N_ep_per_est': 1000,        # epochs per inner loop
     'learning_rate': 1e-3,
     'learning_rate_min': 1e-4,
 
@@ -35,9 +35,9 @@ cfg = {
     'trainable_beta2': True,
     'use_cache': True,
 
-    # List of LDBP layer indices to plot H filter and estimate beta2/γ
-    # e.g., list(range(1, 41)), list(range(1, 101, 10))
-    'h_plot_layers': [1, 10, 20, 30, 40, 50],
+    # Max number of linear layers to select for H plot and estimation.
+    # Layers are picked uniformly across all linear layers.
+    'h_plot_max_layers': 10,
     'print_interval': 100,
     'h_plot_ds': 500,
     'debug_h_plot': 0,          # 1=plot H after each N_est, 0=only final
@@ -153,6 +153,16 @@ model = LDBP(
 total_params = sum(pn.numel() for pn in model.parameters())
 trainable_params = sum(pn.numel() for pn in model.parameters() if pn.requires_grad)
 print(f"  Total parameters: {total_params:,}  |  Trainable: {trainable_params:,}")
+
+# Auto-select linear layer indices for H plot and estimation
+n_linear = sum(1 for ly in model.layers if hasattr(ly, 'H_real'))
+max_layers = cfg['h_plot_max_layers']
+if n_linear <= max_layers:
+    cfg['h_plot_layers'] = list(range(1, n_linear + 1))
+else:
+    cfg['h_plot_layers'] = list(np.linspace(1, n_linear, max_layers, dtype=int))
+print(f"  H-plot/estimation layers: {cfg['h_plot_layers']}  "
+      f"(out of {n_linear} linear layers)")
 
 # =====================================================================
 # 5. Check for cached PRDBP model (skip training if found)
@@ -327,6 +337,7 @@ if not pretrained:
                 estimate_beta2(model, Nsub, fs_sub, fch, p, cfg,
                                layer_indices=cfg['h_plot_layers'],
                                downsample=cfg['h_plot_ds'],
+                               fit_fmin_ghz=(p['Rs']/20/1e9), fit_fmax_ghz=(p['Rs']/5/1e9),
                                prev_beta2=prev_b2)
         else:
             beta2_est = prev_b2
