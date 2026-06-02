@@ -411,7 +411,7 @@ def estimate_beta2(model, Nsub, fs_sub, fch, p, cfg,
     Method (M2): fit  phi_learned = a*w^2 + b*w + c  in [f_min, f_max]
     weighted by |H_init|^2, then  beta2_est = -2a/h_dbp.
 
-    Frequency limits default to system-dependent values:
+    Frequency limits default to system-dependent values (when not set via cfg):
         f_min = Rs / 20       (1.6 GHz @ 32Gbaud)
         f_max = Rs / 3        (10.7 GHz @ 32Gbaud)
 

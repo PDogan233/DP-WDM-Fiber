@@ -36,7 +36,7 @@ print(f"\nCenter channel: m={m_center}, fch={fch/1e9:.2f} GHz")
 cfg = {
     'steps_per_span': 10,
 
-    'N_est': 5,                 # outer loop iterations
+    'N_est': 1,                 # outer loop iterations
     'N_ep_per_est': 500,        # epochs per inner loop
     'learning_rate': 1e-3,
     'learning_rate_min': 1e-4,
@@ -219,7 +219,6 @@ if cfg.get('use_cache') and os.path.exists(model_path):
                               for i in range(len(loss_per_est_history) - 1)))
         print(f"  Final loss (train): {final_loss_train:.6e}")
         print(f"  Final loss (test) : {final_loss_test:.6e}")
-        
 
         beta2_true = p['beta2']
         beta2_dsp = p['beta2_DSP']
