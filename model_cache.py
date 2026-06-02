@@ -7,7 +7,7 @@ import torch
 from data_cache import build_cache_path, _param_snapshot
 
 # Increment when checkpoint format changes (new required keys, etc.)
-CURRENT_CKPT_VERSION = 4
+CURRENT_CKPT_VERSION = 5
 
 
 def build_model_dir(p, seed_train, seed_test):
@@ -60,6 +60,13 @@ def build_model_filename_prdbp(cfg, p):
     lrmin_str = f"{cfg['learning_rate_min']:.0e}".replace('-', 'm')
     g_flag = 'GT' if cfg['trainable_gamma'] else 'GF'
     b2_flag = 'B2T' if cfg['trainable_beta2'] else 'B2F'
+
+    def _ghz_str(val):
+        s = f"{val:.1f}".rstrip('0').rstrip('.')
+        return s
+
+    fmin_str = _ghz_str(cfg['fit_fmin_ghz'])
+    fmax_str = _ghz_str(cfg['fit_fmax_ghz'])
     name = (
         f"stps{cfg['steps_per_span']}_"
         f"lr{lr_str}_"
@@ -67,6 +74,7 @@ def build_model_filename_prdbp(cfg, p):
         f"Nest{cfg['N_est']}_"
         f"ep{cfg['N_ep_per_est']}_"
         f"e2{e2}_e3{e3}_e4{e4}_"
+        f"fmin{fmin_str}_fmax{fmax_str}_"
         f"{g_flag}_{b2_flag}"
     )
     return f'{name}.pth'
@@ -100,7 +108,8 @@ def load_model_cache(path, cfg, p):
     # Validate cfg
     for k in ['steps_per_span', 'trainable_gamma', 'trainable_beta2',
               'num_epochs', 'N_ep_per_est', 'N_est',
-              'learning_rate', 'learning_rate_min']:
+              'learning_rate', 'learning_rate_min',
+              'fit_fmin_ghz', 'fit_fmax_ghz']:
         if checkpoint['cfg'].get(k) != cfg.get(k):
             raise ValueError(
                 f"cfg mismatch: {k} current={cfg.get(k)}  cached={checkpoint['cfg'].get(k)}\n"

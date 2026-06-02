@@ -20,20 +20,34 @@ from model_cache import (build_model_dir, build_model_filename_prdbp,
 
 
 # =====================================================================
+# 1. Load parameters
+# =====================================================================
+p = get_parameters()
+
+# Center channel only
+m_center = p['Nch'] // 2
+fch = p['ch_idx'][m_center] * p['DeltaF']
+print(f"\nCenter channel: m={m_center}, fch={fch/1e9:.2f} GHz")
+
+# =====================================================================
 # Configuration
 # =====================================================================
 
 cfg = {
     'steps_per_span': 10,
 
-    'N_est': 1,                 # outer loop iterations
-    'N_ep_per_est': 1000,        # epochs per inner loop
+    'N_est': 5,                 # outer loop iterations
+    'N_ep_per_est': 500,        # epochs per inner loop
     'learning_rate': 1e-3,
     'learning_rate_min': 1e-4,
 
     'trainable_gamma': False,
     'trainable_beta2': True,
     'use_cache': True,
+
+    # Beta2 estimation fit window (GHz), derived from symbol rate Rs
+    'fit_fmin_ghz': p['Rs'] / 20 / 1e9,
+    'fit_fmax_ghz': p['Rs'] / 5 / 1e9,
 
     # Max number of linear layers to select for H plot and estimation.
     # Layers are picked uniformly across all linear layers.
@@ -45,16 +59,6 @@ cfg = {
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {DEVICE}")
-
-# =====================================================================
-# 1. Load parameters
-# =====================================================================
-p = get_parameters()
-
-# Center channel only
-m_center = p['Nch'] // 2
-fch = p['ch_idx'][m_center] * p['DeltaF']
-print(f"\nCenter channel: m={m_center}, fch={fch/1e9:.2f} GHz")
 
 # =====================================================================
 # 2. Generate or load cached datasets (channel SSFM and label DBP)
@@ -337,7 +341,7 @@ if not pretrained:
                 estimate_beta2(model, Nsub, fs_sub, fch, p, cfg,
                                layer_indices=cfg['h_plot_layers'],
                                downsample=cfg['h_plot_ds'],
-                               fit_fmin_ghz=(p['Rs']/20/1e9), fit_fmax_ghz=(p['Rs']/5/1e9),
+                               fit_fmin_ghz=cfg['fit_fmin_ghz'], fit_fmax_ghz=cfg['fit_fmax_ghz'],
                                prev_beta2=prev_b2)
         else:
             beta2_est = prev_b2
