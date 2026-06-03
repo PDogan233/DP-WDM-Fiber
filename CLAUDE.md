@@ -67,9 +67,9 @@ Examples:
 | `ldbp.py` | **Learned DBP** — PyTorch `nn.Module`. Alternating `LDBP_LinearLayer` (learnable frequency-domain filter `H`, optionally trainable via `trainable_beta2`) and `LDBP_NonlinearLayer` (Manakov Kerr, optionally trainable `gamma`). Both use `nn.Parameter(..., requires_grad=...)` for flexible freeze/unfreeze. Structure per step: Linear → Nonlinear (no symmetric SSF). EDFA gain removal between spans is fixed. **PRDBP support**: `reinitialize_linear_layers(beta2, beta3)` and `reinitialize_nonlinear_layers(gamma)` update Parameter data in-place to project H back to physical form. Stores `Nsub`, `fs_sub`, `fch`, `L_span`, `alpha_dBpm` as instance attributes for reinitialization use. |
 | `ldbp_utils.py` | Helpers: `complex_np_to_torch`, `extract_subband`, `rx_after_dbp`, `plot_constellation_grid`, `plot_ber_bars`, `plot_h_vs_ideal`, `plot_h_vs_init` (with optional `fig_suffix` for unique figure windows), `estimate_beta2` (M2, primary), `estimate_gamma` (direct extraction), `_extract_learned_h`, `_extract_learned_gamma`, `estimate_beta2_m1`, `estimate_beta2_m3` (reference). H visualization uses block-average downsampling and individual phase unwrapping. |
 | `data_cache.py` | Simulation data caching: `build_cache_path`, `save_sim_cache`, `load_sim_cache`. Saves SSFM results to `data/` to skip recomputation when parameters haven't changed. |
-| `model_cache.py` | Model checkpoint caching: `build_model_dir`, `build_model_filename` (LDBP), `build_model_filename_prdbp` (PRDBP), `save_model_cache`, `load_model_cache`, `CURRENT_CKPT_VERSION` (currently **5**). PRDBP filename includes `Nest`, `fmin`, `fmax` fields. cfg validation list includes `fit_fmin_ghz`, `fit_fmax_ghz`. Version bump triggers re-training on incompatible checkpoints. |
+| `model_cache.py` | Model checkpoint caching: `build_model_dir`, `build_model_filename` (LDBP), `build_model_filename_prdbp` (PRDBP), `save_model_cache`, `load_model_cache`, `CURRENT_CKPT_VERSION` (currently **7**). PRDBP filename includes `Nest`, `fmin`, `fmax` fields. cfg validation list includes `fit_fmin_ghz`, `fit_fmax_ghz`. Version bump triggers re-training on incompatible checkpoints. |
 | `main_ldbp_test.py` | LDBP training + evaluation script. Center channel only. Single training loop with parameter estimation at the end. |
-| `main_prdbp_test.py` | **PRDBP** training + evaluation. Double loop: outer loop (N_est iterations) reinitializes model from estimated β₂/γ, inner loop (N_ep_per_est epochs) trains via Adam + CosineAnnealingLR. Tracks estimation histories and per-N_est loss. Supports conditional estimation (skips non-trainable params) and debug H plots. |
+| `main_prdbp_test.py` | **PRDBP** training + evaluation. Double loop: outer loop (N_est iterations) reinitializes model from estimated β₂/γ, inner loop (N_ep_per_est epochs) trains via Adam + CosineAnnealingLR. Per-epoch test loss evaluation (printed every `print_interval`). Per-N_est train+test BER tracking. Tracks estimation histories. Supports conditional estimation (skips non-trainable params) and debug H plots. |
 
 ### Data flow (main_simu_v4.py / main_simu_test.py)
 1. `get_parameters()` → params dict `p`
@@ -131,14 +131,27 @@ Gamma is estimated by **directly reading** the learned `gamma` parameter from ea
 
 PRDBP wraps LDBP training in a double loop to enforce physical constraints (`main_prdbp_test.py`):
 
-- **Outer loop** (N_est iterations): train → estimate β₂ (and optionally γ) from learned H → re-initialize all linear/nonlinear layers with estimated physical params
+- **Outer loop** (N_est iterations): train → evaluate test loss/BER → estimate β₂ (and optionally γ) from learned H → re-initialize all linear/nonlinear layers with estimated physical params
 - **Inner loop** (N_ep_per_est epochs): standard gradient descent training (Adam + CosineAnnealingLR). Optimizer and scheduler are **reset each N_est** — learning rate decays from `learning_rate` to `learning_rate_min` independently per iteration.
+- **Per-epoch test loss**: each epoch computes both train and test loss. Test loss is computed via a no-grad forward pass on the test set after the train step. Both are recorded every epoch but only printed every `print_interval`.
+- **Per-N_est BER**: after each inner loop, model runs forward pass on BOTH train and test waveforms, then `rx_after_dbp()` to compute BER. Train BER is stored in `ber_x/y_train_per_est_history`, test BER in `ber_x/y_per_est_history`.
 - **Re-initialization**: `LDBP.reinitialize_linear_layers(beta2, beta3)` recomputes `H_real`/`H_imag` from the physical formula and updates Parameters via `.data.copy_()`. `LDBP.reinitialize_nonlinear_layers(gamma)` updates gamma via `.data.fill_()`.
 - **Key insight**: LDBP can achieve low waveform MSE without H converging to true β₂. PRDBP projects H back onto the manifold of physically-valid filters after each training phase, preventing non-physical overfitting.
 
 **Estimation histories**: `beta2_est_history` and `gamma_est_history` are pre-populated with DSP init values (length N_est+1), making the outer loop uniform across all iterations. `acc_per_est` (per-estimation accuracy improvement vs previous estimate) and `acc_overall` (vs DSP init) are tracked.
 
-**Conditional estimation**: When `trainable_beta2=False` or `trainable_gamma=False`, the estimate function is skipped entirely (no terminal output). The unchanged value is recorded with `acc_overall=0.0`.
+**Loss histories**:
+- `all_loss_history` — train MSE per epoch, concatenated across all N_est (length = N_est × N_ep_per_est)
+- `all_test_loss_history` — test MSE per epoch, concatenated across all N_est (length = N_est × N_ep_per_est)
+- Init loss: `all_loss_history[0]` / `all_test_loss_history[0]` (first epoch of first N_est)
+- Final loss: `all_loss_history[-1]` / `all_test_loss_history[-1]` (last epoch of last N_est)
+- Loss plot: only 2 clean lines — train loss + test loss, both per epoch
+
+**BER histories** (per-N_est, both train and test):
+- `ber_x/y_per_est_history[0]` = init test BER; `[k]` = test BER after N_est k-1
+- `ber_x/y_train_per_est_history[0]` = init train BER; `[k]` = train BER after N_est k-1
+
+**Conditional estimation**: When `trainable_beta2=False` or `trainable_gamma=False`, the estimate function is skipped entirely (no terminal output). The unchanged value is recorded with `acc_overall=0.0`. BER tracking runs regardless of trainable flags.
 
 **Debug H plots**: When `cfg['debug_h_plot']=1`, `plot_h_vs_ideal` and `plot_h_vs_init` are called after each N_est with unique `fig_suffix=' (N_est N)'` to create separate figure windows. Final evaluation always shows H plots regardless of flag.
 
@@ -160,7 +173,7 @@ PRDBP wraps LDBP training in a double loop to enforce physical constraints (`mai
 
 ### Data flow (main_prdbp_test.py)
 1. `p = get_parameters()` (before cfg, so `p['Rs']` is available for fit window defaults)
-2. cfg includes: `N_est`, `N_ep_per_est`, `fit_fmin_ghz`, `fit_fmax_ghz`, `h_plot_max_layers`, `debug_h_plot`
+2. cfg includes: `N_est`, `N_ep_per_est`, `print_interval`, `fit_fmin_ghz`, `fit_fmax_ghz`, `h_plot_max_layers`, `debug_h_plot`
 3. SSFM data (same cache logic as LDBP, reuse `data_cache.py`)
 4. Convert to torch tensors
 5. Build model with DSP-mismatched params
@@ -168,16 +181,17 @@ PRDBP wraps LDBP training in a double loop to enforce physical constraints (`mai
 7. Check model cache (`build_model_filename_prdbp`)
 8. If cache hit: restore model + all histories, print per-N_est estimates, skip to plots
 9. If not: **PRDBP double loop**:
-   - **6a.** Reinitialize model (n_est=0: init eval with BER; n_est≥1: `reinitialize_linear_layers` + `reinitialize_nonlinear_layers`)
-   - **6b.** Train inner loop (Adam + CosineAnnealingLR, reset per iteration)
-   - **6c.** Parameter estimation (conditional: skip if non-trainable)
-   - **6d.** Record estimates + acc values to histories
-   - **6e.** Debug H plots (if `debug_h_plot=1`, with unique `fig_suffix`)
-   - **6f.** Print per-iteration summary
+   - **6a.** Reinitialize model (n_est=0: init eval with train+test loss/BER; n_est≥1: `reinitialize_linear_layers` + `reinitialize_nonlinear_layers`)
+   - **6b.** Train inner loop (Adam + CosineAnnealingLR, reset per iteration). Each epoch: train step → no-grad test forward pass → record both losses. Print both every `print_interval`.
+   - **6c.** Per-N_est BER evaluation after inner loop: forward pass on both train & test sets → `rx_after_dbp()` → record test/train BER
+   - **6d.** Parameter estimation (conditional: skip if non-trainable)
+   - **6e.** Record estimates + acc values to histories
+   - **6f.** Debug H plots (if `debug_h_plot=1`, with unique `fig_suffix`)
+   - **6g.** Print per-iteration summary
 10. Final evaluation (loss + BER), save checkpoint with all histories
-11. BER summary
+11. BER summary (per-N_est train+test BER + final + True DBP)
 12. Constellation data (re-run if pretrained)
-13. Plots: constellation, concatenated loss curve with N_est boundary lines, BER bars, parameter estimation curves (split by trainable flag), H filter analysis
+13. Plots: constellation, loss curve (2 clean lines: train + test per epoch), BER bars, BER vs N_est curve (train+test), parameter estimation curves (split by trainable flag), H filter analysis
 
 ### LDBP vs analytical DBP design differences
 
@@ -196,7 +210,7 @@ PRDBP wraps LDBP training in a double loop to enforce physical constraints (`mai
 - **LDBP is initialized from physical formula** (with mismatch if DSP params differ), then fine-tuned via gradient descent to compensate for both the mismatch and the coarse step approximation.
 - **LDBP training target** is the true DBP output (matched physical params, fine steps), not the TX symbols, avoiding the need for differentiable clock recovery and demodulation.
 - **Simulation data caching** (`data_cache.py`): SSFM results saved to `data/` with human-readable filenames encoding key physical params (Nsym, Nch, Nspans, L_span, PinW_ch, etc.). Internal param snapshots validate that loaded data matches current `para.py`. Eta (DSP mismatch) params are excluded from the data snapshot since they don't affect SSFM.
-- **Model checkpoint caching** (`model_cache.py`): LDBP uses `build_model_filename` → `stps{steps}_lr{lr}_lrmin{lrmin}_ep{epochs}_e2{eta2}_e3{eta3}_e4{eta4}_{GT|GF}_{B2T|B2F}.pth`. PRDBP uses `build_model_filename_prdbp` which adds `Nest{N_est}` (before `ep`) and `fmin{val}_fmax{val}` (GHz values). `CURRENT_CKPT_VERSION` (currently **5**) stored in each checkpoint — version mismatch triggers re-training. Both LDBP and PRDBP checkpoints are validated against current cfg (including fit window params for PRDBP); any mismatch raises ValueError.
+- **Model checkpoint caching** (`model_cache.py`): LDBP uses `build_model_filename` → `stps{steps}_lr{lr}_lrmin{lrmin}_ep{epochs}_e2{eta2}_e3{eta3}_e4{eta4}_{GT|GF}_{B2T|B2F}.pth`. PRDBP uses `build_model_filename_prdbp` which adds `Nest{N_est}` (before `ep`) and `fmin{val}_fmax{val}` (GHz values). `CURRENT_CKPT_VERSION` (currently **7**) stored in each checkpoint — version mismatch triggers re-training. Both LDBP and PRDBP checkpoints are validated against current cfg (including fit window params for PRDBP); any mismatch raises ValueError. PRDBP checkpoints additionally include `all_test_loss_history`, `ber_x/y_per_est_history`, `ber_x/y_train_per_est_history` (added in v6/v7).
 - **H filter visualization**: block-average downsampling (not strided decimation) prevents aliasing of phase wrapping artifacts. Phase residual uses individually unwrapped curves subtracted (`unwrap(angle(learned)) - unwrap(angle(ref))`), which is more robust than computing the angle of the complex product. All H plot rows now include x-axis labels ("Frequency (GHz)").
 - **Beta2 estimation from learned H**: M2 (direct φ_learned quadratic fit) is the primary method. Fitting φ_learned (~3.7 rad signal) rather than Δφ (~0.02 rad residual) gives ~500× better SNR. Trusted frequency window defaults to `[Rs/20, Rs/3]` — these are anchored to the symbol rate Rs (not hardcoded GHz) so they auto-adapt to different system configurations. |H_init|² weighting provides inverse-variance optimal weights since phase noise ∝ 1/|H|.
 - **Phase residual is non-quadratic after training**: the network learns frequency-domain ripple that compensates β₂ mismatch at the waveform level without converging to the true β₂ in H's phase. This is the core motivation for PRDBP's physics-regulation outer loop.
@@ -210,12 +224,13 @@ PRDBP wraps LDBP training in a double loop to enforce physical constraints (`mai
 - `beta3` is set to 0 in `para.py` for simplified testing.
 - DSP mismatch params (eta1-eta4) control the initialization error for LDBP robustness testing. They are stored in `p` for access by `model_cache.py`. eta2 controls beta2 mismatch, eta4 controls gamma mismatch.
 - The `decimator` and `sync_align` functions use non-differentiable operations (argmax, spline interpolation) and are only used for evaluation, not during LDBP training.
-- **Layer selection**: `h_plot_max_layers` (default 10) determines how many linear layers are used for H plots and estimation. Layers are auto-selected uniformly across all linear layers after model creation. The computed `h_plot_layers` list is stored back to cfg for use by all estimation/plot functions.
+- **Layer selection**: `h_plot_max_layers` (default 10) determines how many linear/nonlinear layers are used for H plots and estimation (both β₂ and γ). Layers are auto-selected uniformly across all layers after model creation. The computed `h_plot_layers` list is stored back to cfg for use by all estimation/plot functions.
 - **Downsampling**: `h_plot_ds` controls block-average downsampling factor for BOTH H plots and β₂ estimation (via `downsample` parameter). The `_block_downsample` function does block averaging (not strided decimation).
 - `estimate_beta2()` frequency limits come from `cfg['fit_fmin_ghz']` and `cfg['fit_fmax_ghz']` (derived from `p['Rs']`). Function defaults (`Rs/20` and `Rs/3`) are only used when not passed from cfg. `estimate_beta2_m1()` and `estimate_beta2_m3()` are available as reference methods but not called by default.
-- `CURRENT_CKPT_VERSION` in `model_cache.py` (currently **5**) must be incremented whenever the checkpoint format changes (new required keys, new result fields). Bumping the version ensures old checkpoints trigger automatic re-training rather than crashing.
+- `CURRENT_CKPT_VERSION` in `model_cache.py` (currently **7**) must be incremented whenever the checkpoint format changes (new required keys, new result fields). Bumping the version ensures old checkpoints trigger automatic re-training rather than crashing.
 - `trainable_beta2` and `trainable_gamma` in `cfg` allow independent control of which physical parameters are learned. In PRDBP, setting one to False suppresses its estimation output but still records the unchanged value in histories (`acc_overall=0.0`). The corresponding visualization figure is also skipped.
 - **Prefix convention for acc variables**: `beta2_acc_*` and `gamma_acc_*` keep estimation metrics separate. `acc_overall` = improvement vs DSP init. `acc_per_est` = improvement vs previous N_est estimate (None on first call).
 - **PRDBP learning rate**: Each N_est iteration creates a fresh Adam optimizer + CosineAnnealingLR scheduler with `T_max=N_ep_per_est`. LR decays from `learning_rate` → `learning_rate_min` independently per outer loop.
-- **PRDBP loss tracking**: `loss_per_est_history[0]` = initial loss (before any training), `[1]..[N_est]` = loss after each inner loop. All saved to checkpoint.
+- **PRDBP loss tracking**: `all_loss_history` = per-epoch train loss. `all_test_loss_history` = per-epoch test loss. Both have equal length (N_est × N_ep_per_est). Init loss = `all_loss_history[0]` / `all_test_loss_history[0]`. Final loss = `all_loss_history[-1]` / `all_test_loss_history[-1]`. The per-N_est summary variables (`loss_per_est_history`, `test_loss_per_est_history`) have been removed in v7 — they were redundant with the per-epoch arrays. Test loss is computed every epoch via a no-grad forward pass; terminal output is throttled to `print_interval`.
+- **PRDBP BER tracking**: `ber_x/y_per_est_history[0]` = init test BER, `[1]..[N_est]` = test BER after each inner loop. `ber_x/y_train_per_est_history[0]` = init train BER, `[1]..[N_est]` = train BER after each inner loop. BER is computed via `rx_after_dbp()` on a fresh no_grad forward pass.
 - Parameter estimation results are saved to checkpoint as histories (arrays of length N_est for acc values, N_est+1 for estimate values) so pretrained loading can reproduce all outputs without re-running estimation.

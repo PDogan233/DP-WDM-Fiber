@@ -34,9 +34,9 @@ print(f"\nCenter channel: m={m_center}, fch={fch/1e9:.2f} GHz")
 # =====================================================================
 
 cfg = {
-    'steps_per_span': 5,
+    'steps_per_span': 10,
 
-    'N_est': 3,                 # outer loop iterations
+    'N_est': 1,                 # outer loop iterations
     'N_ep_per_est': 500,        # epochs per inner loop
     'learning_rate': 1e-3,
     'learning_rate_min': 1e-4,
@@ -190,7 +190,7 @@ if cfg.get('use_cache') and os.path.exists(model_path):
         pretrained = True
 
         all_loss_history = ckpt['all_loss_history']
-        all_test_loss_history = ckpt['all_test_loss_history']
+        loss_per_est_history = ckpt['loss_per_est_history']
         final_loss_train = ckpt['final_loss_train']
         final_loss_test = ckpt['final_loss_test']
         ber_x_ldbp_init_train = ckpt['ber_x_ldbp_init_train']
@@ -213,14 +213,10 @@ if cfg.get('use_cache') and os.path.exists(model_path):
         beta2_acc_per_est_history = ckpt['beta2_acc_per_est_history']
         gamma_acc_per_est_history = ckpt['gamma_acc_per_est_history']
 
-        # Per-N_est BER evaluation
-        ber_x_per_est_history = ckpt['ber_x_per_est_history']
-        ber_y_per_est_history = ckpt['ber_y_per_est_history']
-        ber_x_train_per_est_history = ckpt['ber_x_train_per_est_history']
-        ber_y_train_per_est_history = ckpt['ber_y_train_per_est_history']
-
-        print(f"  Init loss  (train): {all_loss_history[0]:.6e}")
-        print(f"  Init loss  (test) : {all_test_loss_history[0]:.6e}")
+        print(f"  Init loss  (train): {loss_per_est_history[0]:.6e}")
+        print(f"  Per-N_est loss:  "
+              + "  |  ".join(f"N_est{i}={loss_per_est_history[i+1]:.4e}"
+                              for i in range(len(loss_per_est_history) - 1)))
         print(f"  Final loss (train): {final_loss_train:.6e}")
         print(f"  Final loss (test) : {final_loss_test:.6e}")
 
@@ -267,14 +263,8 @@ if not pretrained:
     beta2_acc_per_est_history = []
     gamma_acc_per_est_history = []
 
-    all_loss_history = []          # train loss per epoch (including init at index 0)
-    all_test_loss_history = []     # test loss per epoch (including init at index 0)
-
-    # Per-N_est BER tracking
-    ber_x_per_est_history = []        # test BER X-pol: [init, after_N_est_0, after_N_est_1, ...]
-    ber_y_per_est_history = []        # test BER Y-pol
-    ber_x_train_per_est_history = []  # train BER X-pol: [init, after_N_est_0, ...]
-    ber_y_train_per_est_history = []  # train BER Y-pol
+    all_loss_history = []
+    loss_per_est_history = []
 
     for n_est in range(cfg['N_est']):
 
@@ -292,27 +282,16 @@ if not pretrained:
                 rx_wav_ldbp_init_test_ts = model(rx_wav_sub_test_ts)
                 rx_wav_ldbp_init_test = rx_wav_ldbp_init_test_ts.cpu().numpy()
 
-            # Compute initial loss (before any training), train + test
+            # Compute initial loss (before any training)
             loss_init = torch.mean(
                 torch.abs(rx_wav_ldbp_init_train_ts - rx_wav_dbp_train_label_ts) ** 2).item()
-            all_loss_history.append(loss_init)
-
-            loss_test_init = torch.mean(
-                torch.abs(rx_wav_ldbp_init_test_ts - rx_wav_dbp_test_label_ts) ** 2).item()
-            all_test_loss_history.append(loss_test_init)
+            loss_per_est_history.append(loss_init)
 
             ber_x_ldbp_init_train, ber_y_ldbp_init_train, rx_sym_ldbp_init_train = rx_after_dbp(
                 rx_wav_ldbp_init_train, tx_data_train, p, m_center, sps_sub, p['rrc_taps_rx'])
             ber_x_ldbp_init_test, ber_y_ldbp_init_test, rx_sym_ldbp_init_test = rx_after_dbp(
                 rx_wav_ldbp_init_test, tx_data_test, p, m_center, sps_sub, p['rrc_taps_rx'])
-            # Record init BER for per-N_est tracking (both train and test)
-            ber_x_per_est_history.append(ber_x_ldbp_init_test)
-            ber_y_per_est_history.append(ber_y_ldbp_init_test)
-            ber_x_train_per_est_history.append(ber_x_ldbp_init_train)
-            ber_y_train_per_est_history.append(ber_y_ldbp_init_train)
-
             print(f"  Init loss (train)  : {loss_init:.6e}")
-            print(f"  Init loss (test)   : {loss_test_init:.6e}")
             print(f"  Init BER (train): X={ber_x_ldbp_init_train:.3g}, "
                   f"Y={ber_y_ldbp_init_train:.3g}")
             print(f"  Init BER (test) : X={ber_x_ldbp_init_test:.3g}, "
@@ -341,53 +320,18 @@ if not pretrained:
             scheduler.step()
             loss_history.append(loss.item())
 
-            # Test loss every epoch
-            model.eval()
-            with torch.no_grad():
-                test_out = model(rx_wav_sub_test_ts)
-                test_loss = torch.mean(
-                    torch.abs(test_out - rx_wav_dbp_test_label_ts) ** 2).item()
-            all_test_loss_history.append(test_loss)
-            model.train()
-
-            # Print every print_interval epochs
             if (epoch + 1) % cfg['print_interval'] == 0:
                 print(f"  Epoch {epoch+1:4d}/{cfg['N_ep_per_est']}  |  "
-                      f"Train loss: {loss.item():.6e}  |  "
-                      f"Test loss : {test_loss:.6e}  |  "
-                      f"lr: {scheduler.get_last_lr()[0]:.2e}")
+                      f"Loss: {loss.item():.6e}  |  lr: {scheduler.get_last_lr()[0]:.2e}")
         all_loss_history.extend(loss_history)
+        loss_per_est_history.append(loss_history[-1])
 
         total_ep = (n_est + 1) * cfg['N_ep_per_est']
-        print(f"  Inner loop done. Train Loss: {loss_history[0]:.6e} -> {loss_history[-1]:.6e}  "
+        print(f"  Inner loop done. Loss: {loss_history[0]:.6e} -> {loss_history[-1]:.6e}  "
               f"(total epochs so far: {total_ep})")
 
-        # ---- 6c. Test & train evaluation (loss summary + BER for both) ----
+        # ---- 6c. Parameter estimation ----
         model.eval()
-        with torch.no_grad():
-            # Test set
-            rx_wav_ldbp_test_curr_ts = model(rx_wav_sub_test_ts)
-            loss_test_curr = torch.mean(
-                torch.abs(rx_wav_ldbp_test_curr_ts - rx_wav_dbp_test_label_ts) ** 2).item()
-            rx_wav_ldbp_test_curr = rx_wav_ldbp_test_curr_ts.cpu().numpy()
-            # Train set (for per-N_est BER tracking)
-            rx_wav_ldbp_train_curr_ts = model(rx_wav_sub_train_ts)
-            rx_wav_ldbp_train_curr = rx_wav_ldbp_train_curr_ts.cpu().numpy()
-        # Test BER
-        ber_x_test_curr, ber_y_test_curr, _ = rx_after_dbp(
-            rx_wav_ldbp_test_curr, tx_data_test, p, m_center, sps_sub, p['rrc_taps_rx'])
-        # Train BER
-        ber_x_train_curr, ber_y_train_curr, _ = rx_after_dbp(
-            rx_wav_ldbp_train_curr, tx_data_train, p, m_center, sps_sub, p['rrc_taps_rx'])
-        ber_x_per_est_history.append(ber_x_test_curr)
-        ber_y_per_est_history.append(ber_y_test_curr)
-        ber_x_train_per_est_history.append(ber_x_train_curr)
-        ber_y_train_per_est_history.append(ber_y_train_curr)
-        print(f"  Test loss : {loss_test_curr:.6e}  |  "
-              f"Train BER: X={ber_x_train_curr:.3g}, Y={ber_y_train_curr:.3g}  |  "
-              f"Test BER : X={ber_x_test_curr:.3g}, Y={ber_y_test_curr:.3g}")
-
-        # ---- 6d. Parameter estimation ----
         prev_b2 = beta2_est_history[-1]
         prev_g = gamma_est_history[-1]
 
@@ -412,7 +356,7 @@ if not pretrained:
             gamma_acc_overall = 0.0
             gamma_acc_per_est = None
 
-        # ---- 6e. Record ----
+        # ---- 6d. Record ----
         beta2_est_history.append(beta2_est)
         gamma_est_history.append(gamma_est)
         beta2_acc_overall_history.append(beta2_acc_overall)
@@ -420,7 +364,7 @@ if not pretrained:
         beta2_acc_per_est_history.append(beta2_acc_per_est)
         gamma_acc_per_est_history.append(gamma_acc_per_est)
 
-        # ---- 6f. Debug H plots (per-iteration) ----
+        # ---- 6e. Debug H plots (per-iteration) ----
         if cfg['debug_h_plot']:
             suffix = f' (N_est {n_est+1})'
             plot_h_vs_ideal(model, Nsub, fs_sub, fch, p, cfg,
@@ -432,7 +376,7 @@ if not pretrained:
                            downsample=cfg['h_plot_ds'],
                            fig_suffix=suffix)
 
-        # ---- 6g. Iteration summary ----
+        # ---- 6f. Iteration summary ----
         b2_str = f"beta2_est={beta2_est:.4e} (acc_overall={beta2_acc_overall:+.2f}%"
         if beta2_acc_per_est is not None:
             b2_str += f", acc_per_est={beta2_acc_per_est:+.2f}%)"
@@ -443,7 +387,7 @@ if not pretrained:
             g_str += f", acc_per_est={gamma_acc_per_est:+.2f}%)"
         else:
             g_str += ")"
-        print(f"  N_est {n_est+1}/{cfg['N_est']} summary:\n"
+        print(f"\n  N_est {n_est+1}/{cfg['N_est']} summary:\n"
               f"    {b2_str}\n"
               f"    {g_str}")
 
@@ -466,8 +410,10 @@ if not pretrained:
             torch.abs(rx_wav_ldbp_test_ts - rx_wav_dbp_test_label_ts) ** 2).item()
         rx_wav_ldbp_test = rx_wav_ldbp_test_ts.cpu().numpy()
 
-    print(f"  Init loss  (train): {all_loss_history[0]:.6e}")
-    print(f"  Init loss  (test) : {all_test_loss_history[0]:.6e}")
+    print(f"  Init loss  (train): {loss_per_est_history[0]:.6e}")
+    print(f"  Per-N_est loss:  "
+          + "  |  ".join(f"N_est{i}={loss_per_est_history[i+1]:.4e}"
+                          for i in range(cfg['N_est'])))
     print(f"  Final loss (train): {final_loss_train:.6e}")
     print(f"  Final loss (test) : {final_loss_test:.6e}")
     
@@ -488,7 +434,7 @@ if not pretrained:
     print("\nSaving PRDBP model checkpoint...")
     save_model_cache(model_path, model, cfg, p,
         all_loss_history=all_loss_history,
-        all_test_loss_history=all_test_loss_history,
+        loss_per_est_history=loss_per_est_history,
         final_loss_train=final_loss_train,
         final_loss_test=final_loss_test,
         ber_x_ldbp_init_train=ber_x_ldbp_init_train,
@@ -509,10 +455,6 @@ if not pretrained:
         gamma_acc_overall_history=gamma_acc_overall_history,
         beta2_acc_per_est_history=beta2_acc_per_est_history,
         gamma_acc_per_est_history=gamma_acc_per_est_history,
-        ber_x_per_est_history=ber_x_per_est_history,
-        ber_y_per_est_history=ber_y_per_est_history,
-        ber_x_train_per_est_history=ber_x_train_per_est_history,
-        ber_y_train_per_est_history=ber_y_train_per_est_history,
     )
 
 # =====================================================================
@@ -524,19 +466,6 @@ print(f"  LDBP init  (train): X={ber_x_ldbp_init_train:.3g}, "
       f"Y={ber_y_ldbp_init_train:.3g}")
 print(f"  LDBP init  (test) : X={ber_x_ldbp_init_test:.3g}, "
       f"Y={ber_y_ldbp_init_test:.3g}")
-
-# Per-N_est BER tracking (train + test, from per-N_est eval)
-N_ber = len(ber_x_per_est_history) - 1  # exclude init entry at index 0
-if N_ber > 0:
-    print(f"  Per-N_est train BER: "
-          + "  |  ".join(f"N_est{i+1}: X={ber_x_train_per_est_history[i+1]:.3g}, "
-                          f"Y={ber_y_train_per_est_history[i+1]:.3g}"
-                          for i in range(N_ber)))
-    print(f"  Per-N_est test BER:  "
-          + "  |  ".join(f"N_est{i+1}: X={ber_x_per_est_history[i+1]:.3g}, "
-                          f"Y={ber_y_per_est_history[i+1]:.3g}"
-                          for i in range(N_ber)))
-
 print(f"  PRDBP final (train): X={ber_x_ldbp_train:.3g}, "
       f"Y={ber_y_ldbp_train:.3g}")
 print(f"  PRDBP final (test) : X={ber_x_ldbp_test:.3g}, "
@@ -580,20 +509,19 @@ plot_constellation_grid([
      'label': 'True DBP (test)'},
 ])
 
-# b. Training loss curve (train + test per epoch)
-epochs = np.arange(len(all_loss_history))
-plt.figure('PRDBP Training Loss', figsize=(10, 5))
-plt.semilogy(epochs, all_loss_history, linewidth=0.8,
-             label='Train loss')
-plt.semilogy(epochs, all_test_loss_history, linewidth=0.8,
-             label='Test loss')
+# b. Training loss curve (concatenated across all N_est)
+plt.figure('PRDBP Training Loss', figsize=(10, 4))
+plt.semilogy(all_loss_history)
+# Vertical lines at N_est boundaries
+for i in range(1, cfg['N_est']):
+    plt.axvline(x=i * cfg['N_ep_per_est'], color='gray', linestyle='--',
+                linewidth=0.8, alpha=0.6)
 plt.xlabel('Epoch')
 plt.ylabel('MSE Loss')
 plt.title(f"PRDBP Training (N_est={cfg['N_est']}, "
           f"N_ep_per_est={cfg['N_ep_per_est']}, "
           f"steps_per_span={cfg['steps_per_span']}, "
           f"trainable_G={cfg['trainable_gamma']}, trainable_B2={cfg['trainable_beta2']})")
-plt.legend(fontsize=9)
 plt.grid(True)
 plt.tight_layout()
 
@@ -640,32 +568,7 @@ if cfg['trainable_gamma']:
     plt.xticks(n_est_axis)
     plt.tight_layout()
 
-# e. BER vs N_est curve (train + test, tracked per outer iteration)
-plt.figure('PRDBP BER vs N_est', figsize=(8, 5))
-# Train BER (triangles, dashed)
-plt.semilogy(n_est_axis, ber_x_train_per_est_history, 'b^--', markersize=5,
-             linewidth=1.0, label='X-pol (train)')
-plt.semilogy(n_est_axis, ber_y_train_per_est_history, 'r^--', markersize=5,
-             linewidth=1.0, label='Y-pol (train)')
-# Test BER (circles/squares, solid)
-plt.semilogy(n_est_axis, ber_x_per_est_history, 'bo-', markersize=5,
-             linewidth=1.0, label='X-pol (test)')
-plt.semilogy(n_est_axis, ber_y_per_est_history, 'rs-', markersize=5,
-             linewidth=1.0, label='Y-pol (test)')
-# True DBP reference lines
-plt.axhline(y=ber_x_dbp_test_label, color='blue', linestyle=':', linewidth=0.8,
-            alpha=0.6, label=f'True DBP X')
-plt.axhline(y=ber_y_dbp_test_label, color='red', linestyle=':', linewidth=0.8,
-            alpha=0.6, label=f'True DBP Y')
-plt.xlabel('N_est iteration')
-plt.ylabel('BER')
-plt.title('PRDBP Train and Test BER per N_est')
-plt.legend(fontsize=6, ncol=2)
-plt.grid(True, alpha=0.3)
-plt.xticks(n_est_axis)
-plt.tight_layout()
-
-# f. H filter analysis
+# e. H filter analysis
 plot_h_vs_ideal(model, Nsub, fs_sub, fch, p, cfg,
                 layer_indices=cfg['h_plot_layers'],
                 downsample=cfg['h_plot_ds'])

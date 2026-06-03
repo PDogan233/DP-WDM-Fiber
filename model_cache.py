@@ -7,7 +7,7 @@ import torch
 from data_cache import build_cache_path, _param_snapshot
 
 # Increment when checkpoint format changes (new required keys, etc.)
-CURRENT_CKPT_VERSION = 5
+CURRENT_CKPT_VERSION = 7
 
 
 def build_model_dir(p, seed_train, seed_test):
